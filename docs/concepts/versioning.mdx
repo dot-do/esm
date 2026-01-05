@@ -1,0 +1,272 @@
+---
+title: Versioning
+description: Understanding the git-based versioning system in esm.do
+---
+
+# Versioning
+
+esm.do uses a git-like content-addressed versioning system. Every write creates a new commit, and modules can be read at any point in their history.
+
+## Content-Addressed Storage
+
+Unlike traditional semantic versioning (1.0.0, 1.2.3), esm.do uses content-addressed hashes similar to git commits:
+
+```
+a3f2dd1  # Initial implementation
+b7c4ee2  # Add edge case tests
+c9d8f3a  # Fix division by zero bug
+```
+
+### Why Content Addressing?
+
+| Semantic Versioning | Content Addressing |
+|---------------------|-------------------|
+| Manual version bumps | Automatic on every change |
+| Version conflicts possible | Guaranteed unique |
+| "Latest" can vary | Deterministic content |
+| Breaking change ambiguity | Exact content known |
+
+## Version Hashes
+
+Each version is identified by a SHA-1 hash (abbreviated to 7 characters for display):
+
+```typescript
+const result = await esm.write({
+  name: '@math/add',
+  types: '...',
+  module: '...'
+})
+
+console.log(result.version) // 'a3f2dd1'
+```
+
+The full hash is available when needed:
+
+```typescript
+// Full 40-character hash
+const fullHash = 'a3f2dd1b7c4ee2f8d9a0b1c2d3e4f5a6b7c8d9e0'
+
+// Abbreviated 7-character hash
+const shortHash = 'a3f2dd1'
+```
+
+## Reading Versions
+
+### Latest Version
+
+By default, reads return the latest version:
+
+```typescript
+const module = await esm.read('@math/add')
+console.log(module.version) // Latest version hash
+```
+
+### Specific Version
+
+Read a module at a specific version:
+
+```typescript
+// Using the SDK
+const oldModule = await esm.read('@math/add', 'a3f2dd1')
+
+// Using the API
+// GET https://esm.do/@math/add@a3f2dd1
+```
+
+### Version History
+
+Get the complete version history:
+
+```typescript
+const versions = await esm.versions('@math/add')
+
+// [
+//   { version: 'c9d8f3a', message: 'Fix division by zero', timestamp: '2024-01-16T...' },
+//   { version: 'b7c4ee2', message: 'Add edge case tests', timestamp: '2024-01-15T...' },
+//   { version: 'a3f2dd1', message: 'Initial implementation', timestamp: '2024-01-14T...' }
+// ]
+```
+
+## Comparing Versions
+
+Compare two versions to see what changed:
+
+```typescript
+const diff = await esm.diff('@math/add', 'a3f2dd1', 'c9d8f3a')
+
+console.log(diff)
+// {
+//   name: '@math/add',
+//   from: 'a3f2dd1',
+//   to: 'c9d8f3a',
+//   changes: {
+//     types: { modified: false, added: [], removed: [] },
+//     module: { modified: true, added: [...], removed: [...] },
+//     tests: { modified: true, added: [...], removed: [...] },
+//     script: { modified: false, added: [], removed: [] }
+//   }
+// }
+```
+
+### CLI Diff
+
+```bash
+esm diff @math/add@a3f2dd1 @math/add@c9d8f3a
+
+# Output:
+# --- @math/add@a3f2dd1
+# +++ @math/add@c9d8f3a
+#
+# Module:
+#   export function divide(a, b) {
+# -   return a / b
+# +   if (b === 0) throw new Error('Division by zero')
+# +   return a / b
+#   }
+```
+
+## Version Immutability
+
+Once created, versions are immutable:
+
+- A version hash always returns the same content
+- You cannot modify an existing version
+- Updates create new versions
+
+This guarantees reproducibility:
+
+```typescript
+// This will ALWAYS return the exact same content
+const module = await esm.read('@math/add', 'a3f2dd1')
+```
+
+## Pinning Versions
+
+For production use, pin to specific versions:
+
+```javascript
+// @my-app/calculator.mjs
+
+// Pin to specific version
+import { add } from 'esm.do/@math/add@a3f2dd1'
+
+// Or use latest (not recommended for production)
+import { add } from 'esm.do/@math/add'
+```
+
+<Callout type="warning">
+  Using unpinned imports (`esm.do/@scope/module`) will always fetch the latest version, which may introduce breaking changes.
+</Callout>
+
+## Version Lifecycle
+
+```
+Write v1
+   |
+   v
++-----------------+
+| Version a3f2dd1 |
+| "Initial impl"  |
++-----------------+
+   |
+   | Write v2
+   v
++-----------------+
+| Version b7c4ee2 |
+| "Add tests"     |
++-----------------+
+   |
+   | Write v3
+   v
++-----------------+
+| Version c9d8f3a |
+| "Bug fix"       |
++-----------------+
+   |
+   | latest -> c9d8f3a
+```
+
+All three versions remain accessible:
+
+```typescript
+await esm.read('@math/add')           // c9d8f3a (latest)
+await esm.read('@math/add', 'a3f2dd1') // v1
+await esm.read('@math/add', 'b7c4ee2') // v2
+await esm.read('@math/add', 'c9d8f3a') // v3
+```
+
+## Deletion
+
+Deleting a module removes ALL versions:
+
+```typescript
+await esm.delete('@math/add')
+
+// All versions are now inaccessible
+await esm.read('@math/add')           // Error: Module not found
+await esm.read('@math/add', 'a3f2dd1') // Error: Module not found
+```
+
+## Git Integration
+
+Under the hood, esm.do uses [gitx.do](https://gitx.do), a git reimplementation for Cloudflare Durable Objects:
+
+### Storage Structure
+
+```
+Repository: @math/add
+├── HEAD -> refs/heads/main
+├── refs/
+│   └── heads/
+│       └── main -> c9d8f3a
+├── objects/
+│   ├── blobs (file contents)
+│   ├── trees (directory structure)
+│   └── commits (versions)
+```
+
+### Commit Structure
+
+Each version is a git commit containing:
+
+```
+commit c9d8f3a
+Author: esm.do <system@esm.do>
+Date:   Mon Jan 15 12:00:00 2024
+
+    Fix division by zero bug
+
+tree 8b3f2a1
+├── index.d.ts   -> blob abc123
+├── index.mjs    -> blob def456
+├── index.test.js -> blob ghi789
+└── index.script.js -> blob jkl012
+
+parent b7c4ee2
+```
+
+## Best Practices
+
+### For Development
+
+- Use latest versions for rapid iteration
+- Run tests frequently
+- Use `esm log` to track changes
+
+### For Production
+
+- Pin to specific versions
+- Document version requirements
+- Test before upgrading versions
+
+### For Libraries
+
+- Maintain backwards compatibility
+- Document breaking changes
+- Consider version ranges for dependencies
+
+## Next Steps
+
+- [Module Structure](/concepts/modules) - How modules are organized
+- [SDK Reference](/api/sdk) - Version operations in code
+- [Examples](/examples) - Real-world versioning examples

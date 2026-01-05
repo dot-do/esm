@@ -1,0 +1,237 @@
+---
+title: Getting Started
+description: Installation, setup, and basic usage of esm.do
+---
+
+# Getting Started
+
+This guide walks you through installing esm.do and creating your first module.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+| Requirement | Version | Purpose |
+|-------------|---------|---------|
+| Node.js | 18+ | Runtime environment |
+| npm/pnpm/yarn | Latest | Package manager |
+
+## Installation
+
+Install the esm.do SDK:
+
+```bash
+npm install esm.do
+```
+
+Or with your preferred package manager:
+
+```bash
+pnpm add esm.do
+yarn add esm.do
+bun add esm.do
+```
+
+## CLI Installation
+
+The esm.do package includes a CLI for managing modules from the command line:
+
+```bash
+# Global installation
+npm install -g esm.do
+
+# Verify installation
+esm --version
+```
+
+## Creating Your First Module
+
+### Using the SDK
+
+```typescript
+import { esm } from 'esm.do'
+
+// Create a simple calculator module
+const result = await esm.write({
+  name: '@math/calculator',
+  types: `
+    export declare function add(a: number, b: number): number
+    export declare function subtract(a: number, b: number): number
+  `,
+  module: `
+    export function add(a, b) { return a + b }
+    export function subtract(a, b) { return a - b }
+  `,
+  tests: `
+    describe('calculator', () => {
+      it('adds numbers', () => expect(add(2, 3)).toBe(5))
+      it('subtracts numbers', () => expect(subtract(5, 2)).toBe(3))
+    })
+  `,
+  script: `return add(10, subtract(20, 5))`
+})
+
+console.log('Module created!')
+console.log('Version:', result.version)
+console.log('Tests:', result.testResults)
+console.log('Script result:', result.value) // 25
+```
+
+### Using the CLI
+
+```bash
+# Initialize a new module
+esm init @math/calculator
+
+# Write module files
+esm write @math/calculator \
+  --types="export declare function add(a: number, b: number): number" \
+  --module="export function add(a, b) { return a + b }" \
+  --tests="describe('add', () => { it('works', () => expect(add(1,2)).toBe(3)) })" \
+  --script="return add(10, 20)"
+
+# Run tests
+esm test @math/calculator
+# Output:
+# + adds positive numbers (2ms)
+# + adds negative numbers (1ms)
+# 2 passed, 0 failed
+
+# Execute script
+esm run @math/calculator
+# Output: 30
+```
+
+### Using the HTTP API
+
+```bash
+# Create a module via POST
+curl -X POST https://esm.do/@math/add \
+  -H "Content-Type: application/json" \
+  -d '{
+    "types": "export declare function add(a: number, b: number): number",
+    "module": "export function add(a, b) { return a + b }",
+    "tests": "describe(\"add\", () => { it(\"works\", () => expect(add(1,2)).toBe(3)) })",
+    "script": "return add(10, 20)"
+  }'
+
+# Read the module
+curl https://esm.do/@math/add
+
+# Run tests
+curl -X POST https://esm.do/@math/add/test
+
+# Execute script
+curl -X POST https://esm.do/@math/add/run
+```
+
+## Module Naming Convention
+
+Modules follow a scoped naming pattern:
+
+```
+@scope/module-name
+```
+
+- **Scope**: A namespace prefix starting with `@` (e.g., `@math`, `@utils`, `@myorg`)
+- **Module name**: The actual module identifier using kebab-case
+
+<Callout type="info">
+  Scopes are required for all modules. This prevents naming collisions and provides namespace organization.
+</Callout>
+
+### Valid Names
+
+```
+@math/add
+@utils/string-helpers
+@mycompany/auth-client
+@ai/text-processor
+```
+
+### Invalid Names
+
+```
+add              # Missing scope
+@scope/          # Missing module name
+math/add         # Scope must start with @
+@SCOPE/Module    # Use lowercase
+```
+
+## The Four Files
+
+Every esm.do module consists of four files:
+
+### Types (`.d.ts`)
+
+The module's contract. Declares what the module exports without implementation details.
+
+```typescript
+// @math/calculator.d.ts
+export declare function add(a: number, b: number): number
+export declare function subtract(a: number, b: number): number
+export declare function multiply(a: number, b: number): number
+export declare function divide(a: number, b: number): number
+```
+
+### Module (`.mjs`)
+
+The implementation. ESM code that fulfills the type contract.
+
+```javascript
+// @math/calculator.mjs
+export function add(a, b) { return a + b }
+export function subtract(a, b) { return a - b }
+export function multiply(a, b) { return a * b }
+export function divide(a, b) {
+  if (b === 0) throw new Error('Division by zero')
+  return a / b
+}
+```
+
+### Tests (`.test.js`)
+
+Verification using vitest-compatible API. Module exports are automatically in scope.
+
+```javascript
+// @math/calculator.test.js
+describe('calculator', () => {
+  describe('add', () => {
+    it('adds positive numbers', () => expect(add(2, 3)).toBe(5))
+    it('adds negative numbers', () => expect(add(-1, -2)).toBe(-3))
+  })
+
+  describe('divide', () => {
+    it('divides numbers', () => expect(divide(10, 2)).toBe(5))
+    it('throws on division by zero', () => {
+      expect(() => divide(1, 0)).toThrow('Division by zero')
+    })
+  })
+})
+```
+
+### Script (`.script.js`)
+
+An executable entry point. Module exports are in scope. Return value is captured.
+
+```javascript
+// @math/calculator.script.js
+// All exports available: add, subtract, multiply, divide
+
+const a = 100
+const b = 25
+
+console.log(`${a} + ${b} = ${add(a, b)}`)
+console.log(`${a} - ${b} = ${subtract(a, b)}`)
+console.log(`${a} * ${b} = ${multiply(a, b)}`)
+console.log(`${a} / ${b} = ${divide(a, b)}`)
+
+return { sum: add(a, b), product: multiply(a, b) }
+```
+
+## What's Next?
+
+- Learn about the [HTTP API routes](/api/routes)
+- Explore the [SDK client](/api/sdk)
+- Understand [module concepts](/concepts/modules)
+- See [real-world examples](/examples)

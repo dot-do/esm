@@ -1,0 +1,390 @@
+---
+title: ESM Modules
+description: Understanding how esm.do modules work - the four-file structure and module lifecycle
+---
+
+# ESM Modules
+
+Every esm.do module is a "living" entity consisting of four synchronized files that work together to provide types, implementation, verification, and execution.
+
+## The Four-File Structure
+
+```
+@scope/module/
+  index.d.ts      # Types - the contract
+  index.mjs       # Module - the implementation
+  index.test.js   # Tests - the verification
+  index.script.js # Script - the execution
+```
+
+Each file serves a specific purpose in the module lifecycle:
+
+| File | Purpose | Required |
+|------|---------|----------|
+| `index.d.ts` | TypeScript type declarations | Yes |
+| `index.mjs` | ESM implementation | Yes |
+| `index.test.js` | Vitest-compatible tests | No |
+| `index.script.js` | Executable entry point | No |
+
+## Types (`.d.ts`)
+
+The types file declares the module's public API contract. It specifies what the module exports without implementation details.
+
+```typescript
+// @math/calculator.d.ts
+
+export declare function add(a: number, b: number): number
+export declare function subtract(a: number, b: number): number
+export declare function multiply(a: number, b: number): number
+export declare function divide(a: number, b: number): number
+
+export declare interface CalculatorOptions {
+  precision?: number
+  roundingMode?: 'floor' | 'ceil' | 'round'
+}
+
+export declare class Calculator {
+  constructor(options?: CalculatorOptions)
+  add(a: number, b: number): number
+  history: number[]
+}
+```
+
+### Type Validation
+
+When you write a module, the type declarations are validated:
+
+- Syntax must be valid TypeScript declaration syntax
+- Types are checked for consistency
+- Invalid types prevent the module from being saved
+
+<Callout type="info">
+  Types are validated but not enforced against the implementation at runtime. They serve as documentation and editor support.
+</Callout>
+
+## Module (`.mjs`)
+
+The module file contains the ESM implementation that fulfills the type contract.
+
+```javascript
+// @math/calculator.mjs
+
+export function add(a, b) {
+  return a + b
+}
+
+export function subtract(a, b) {
+  return a - b
+}
+
+export function multiply(a, b) {
+  return a * b
+}
+
+export function divide(a, b) {
+  if (b === 0) throw new Error('Division by zero')
+  return a / b
+}
+
+export class Calculator {
+  constructor(options = {}) {
+    this.precision = options.precision ?? 2
+    this.roundingMode = options.roundingMode ?? 'round'
+    this.history = []
+  }
+
+  add(a, b) {
+    const result = a + b
+    this.history.push(result)
+    return result
+  }
+}
+```
+
+### Implementation Guidelines
+
+- Use standard ESM `export` syntax
+- Avoid Node.js-specific APIs (use web-standard APIs)
+- Keep modules focused and single-purpose
+- Handle edge cases (null, undefined, zero, etc.)
+
+## Tests (`.test.js`)
+
+The tests file uses a vitest-compatible API. Module exports are automatically available in scope.
+
+```javascript
+// @math/calculator.test.js
+
+describe('calculator', () => {
+  describe('add', () => {
+    it('adds positive numbers', () => {
+      expect(add(2, 3)).toBe(5)
+    })
+
+    it('adds negative numbers', () => {
+      expect(add(-1, -2)).toBe(-3)
+    })
+
+    it('handles zero', () => {
+      expect(add(0, 5)).toBe(5)
+      expect(add(5, 0)).toBe(5)
+    })
+  })
+
+  describe('divide', () => {
+    it('divides numbers', () => {
+      expect(divide(10, 2)).toBe(5)
+    })
+
+    it('throws on division by zero', () => {
+      expect(() => divide(1, 0)).toThrow('Division by zero')
+    })
+  })
+
+  describe('Calculator class', () => {
+    it('creates instance with default options', () => {
+      const calc = new Calculator()
+      expect(calc.precision).toBe(2)
+    })
+
+    it('tracks history', () => {
+      const calc = new Calculator()
+      calc.add(1, 2)
+      calc.add(3, 4)
+      expect(calc.history).toEqual([3, 7])
+    })
+  })
+})
+```
+
+### Test API
+
+The following test functions are available:
+
+| Function | Description |
+|----------|-------------|
+| `describe(name, fn)` | Group related tests |
+| `it(name, fn)` | Define a test case |
+| `expect(value)` | Create an assertion |
+| `beforeEach(fn)` | Run before each test |
+| `afterEach(fn)` | Run after each test |
+| `beforeAll(fn)` | Run once before all tests |
+| `afterAll(fn)` | Run once after all tests |
+
+### Expect Matchers
+
+```javascript
+expect(value).toBe(expected)           // Strict equality
+expect(value).toEqual(expected)        // Deep equality
+expect(value).toBeDefined()            // Not undefined
+expect(value).toBeUndefined()          // Is undefined
+expect(value).toBeNull()               // Is null
+expect(value).toBeTruthy()             // Truthy value
+expect(value).toBeFalsy()              // Falsy value
+expect(value).toContain(item)          // Array/string contains
+expect(value).toHaveLength(n)          // Array/string length
+expect(fn).toThrow()                   // Function throws
+expect(fn).toThrow('message')          // Throws with message
+expect(fn).toThrow(/pattern/)          // Throws matching pattern
+```
+
+### Atomic Writes
+
+When you write a module with tests:
+
+1. Tests are executed first
+2. If all tests pass, the module is saved
+3. If any test fails, the module is NOT saved
+
+This ensures modules are always in a valid, tested state.
+
+## Script (`.script.js`)
+
+The script file provides an executable entry point. Module exports are in scope, and the return value is captured.
+
+```javascript
+// @math/calculator.script.js
+
+// All exports are automatically available:
+// add, subtract, multiply, divide, Calculator
+
+const a = 100
+const b = 25
+
+console.log(`Performing calculations with ${a} and ${b}`)
+console.log(`${a} + ${b} = ${add(a, b)}`)
+console.log(`${a} - ${b} = ${subtract(a, b)}`)
+console.log(`${a} * ${b} = ${multiply(a, b)}`)
+console.log(`${a} / ${b} = ${divide(a, b)}`)
+
+// Using the Calculator class
+const calc = new Calculator({ precision: 4 })
+calc.add(1.1111, 2.2222)
+calc.add(3.3333, 4.4444)
+
+// Return value is captured
+return {
+  sum: add(a, b),
+  difference: subtract(a, b),
+  product: multiply(a, b),
+  quotient: divide(a, b),
+  history: calc.history
+}
+```
+
+### Script Arguments
+
+Scripts can receive arguments when executed:
+
+```javascript
+// @greet/hello.script.js
+
+// 'args' is available when arguments are passed
+const name = args?.name ?? 'World'
+const greeting = args?.greeting ?? 'Hello'
+
+return `${greeting}, ${name}!`
+```
+
+Execute with arguments:
+
+```typescript
+const result = await esm.run('@greet/hello', {
+  name: 'Alice',
+  greeting: 'Hi'
+})
+console.log(result.value) // 'Hi, Alice!'
+```
+
+### Console Capture
+
+Console output is captured during script execution:
+
+```javascript
+// @debug/logger.script.js
+
+console.log('Starting execution')
+console.warn('This is a warning')
+console.error('This is an error')
+
+return 'done'
+```
+
+```typescript
+const result = await esm.run('@debug/logger')
+console.log(result.value)  // 'done'
+console.log(result.logs)   // ['Starting execution', 'This is a warning']
+console.log(result.errors) // ['This is an error']
+```
+
+## Module Lifecycle
+
+### Creation
+
+```
+Write Request
+     |
+     v
++--------------------+
+| Validate Name      |
+| (@scope/name)      |
++--------------------+
+     |
+     v
++--------------------+
+| Validate Types     |
+| (TypeScript check) |
++--------------------+
+     |
+     v
++--------------------+
+| Run Tests          |
+| (if provided)      |
++--------------------+
+     |
+     +-- Tests Fail --> Error (not saved)
+     |
+     v
++--------------------+
+| Execute Script     |
+| (if provided)      |
++--------------------+
+     |
+     v
++--------------------+
+| Store Module       |
+| (all 4 files)      |
++--------------------+
+     |
+     v
++--------------------+
+| Return Version     |
+| (commit hash)      |
++--------------------+
+```
+
+### Reading
+
+Modules can be read in several ways:
+
+```bash
+# Full module with all files
+GET /@scope/module
+
+# Specific file only
+GET /@scope/module.d.ts
+GET /@scope/module.mjs
+GET /@scope/module.test.js
+GET /@scope/module.script.js
+
+# Specific version
+GET /@scope/module@abc123
+```
+
+### Execution
+
+Tests and scripts run in an isolated sandbox environment:
+
+- Isolated V8 context
+- Module exports automatically in scope
+- No access to external network (by default)
+- Configurable timeouts
+- Memory limits enforced
+
+## Dependencies
+
+Modules can import other esm.do modules:
+
+```javascript
+// @math/stats.mjs
+
+import { add, divide } from 'esm.do/@math/calculator'
+
+export function mean(numbers) {
+  const sum = numbers.reduce((acc, n) => add(acc, n), 0)
+  return divide(sum, numbers.length)
+}
+
+export function sum(numbers) {
+  return numbers.reduce((acc, n) => add(acc, n), 0)
+}
+```
+
+### Dependency Resolution
+
+When a module is executed:
+
+1. Import statements are analyzed
+2. Dependencies are resolved from esm.do
+3. All dependencies are loaded into the sandbox
+4. Circular dependencies are detected and prevented
+
+<Callout type="warning">
+  Be mindful of dependency chains. Deep dependency trees can increase execution time.
+</Callout>
+
+## Next Steps
+
+- [Versioning](/concepts/versioning) - How module versions work
+- [SDK Reference](/api/sdk) - TypeScript client documentation
+- [Examples](/examples) - Real-world module examples

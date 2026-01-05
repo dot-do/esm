@@ -1,0 +1,494 @@
+---
+title: HTTP Routes
+description: Complete HTTP API reference for esm.do module operations
+---
+
+# HTTP Routes
+
+The esm.do HTTP API provides RESTful endpoints for managing ESM modules. All endpoints are available at `https://esm.do`.
+
+## Base URL
+
+```
+https://esm.do
+```
+
+## Authentication
+
+<Callout type="info">
+  Authentication details coming soon. Currently, all endpoints are publicly accessible.
+</Callout>
+
+## Endpoints
+
+### GET /:name
+
+Retrieve a module's metadata and contents.
+
+**Request:**
+
+```bash
+GET https://esm.do/@math/add
+```
+
+**Response:**
+
+```json
+{
+  "name": "@math/add",
+  "types": "export declare function add(a: number, b: number): number",
+  "module": "export function add(a, b) { return a + b }",
+  "tests": "describe('add', () => { it('works', () => expect(add(1,2)).toBe(3)) })",
+  "script": "return add(10, 20)",
+  "version": "a3f2dd1b7c4ee2",
+  "createdAt": "2024-01-15T10:30:00Z",
+  "updatedAt": "2024-01-15T10:30:00Z"
+}
+```
+
+**Status Codes:**
+
+| Code | Description |
+|------|-------------|
+| 200 | Module found and returned |
+| 404 | Module not found |
+
+---
+
+### GET /:name.:ext
+
+Retrieve a specific file from a module.
+
+**Supported Extensions:**
+
+| Extension | File |
+|-----------|------|
+| `.d.ts` | Type declarations |
+| `.mjs` | Module implementation |
+| `.test.js` | Test code |
+| `.script.js` | Executable script |
+
+**Request:**
+
+```bash
+# Get type declarations
+GET https://esm.do/@math/add.d.ts
+
+# Get module implementation
+GET https://esm.do/@math/add.mjs
+
+# Get test code
+GET https://esm.do/@math/add.test.js
+
+# Get script
+GET https://esm.do/@math/add.script.js
+```
+
+**Response:**
+
+Returns the raw file content with appropriate `Content-Type`:
+
+- `.d.ts` - `application/typescript`
+- `.mjs` - `application/javascript`
+- `.test.js` - `application/javascript`
+- `.script.js` - `application/javascript`
+
+**Status Codes:**
+
+| Code | Description |
+|------|-------------|
+| 200 | File found and returned |
+| 404 | Module or file not found |
+
+---
+
+### GET /:name@:version
+
+Retrieve a module at a specific version.
+
+**Request:**
+
+```bash
+GET https://esm.do/@math/add@a3f2dd1
+```
+
+**Response:**
+
+Same as `GET /:name` but returns the module at the specified version.
+
+**Status Codes:**
+
+| Code | Description |
+|------|-------------|
+| 200 | Module version found and returned |
+| 404 | Module or version not found |
+
+---
+
+### POST /:name
+
+Create or update a module. Tests are automatically run before committing.
+
+**Request:**
+
+```bash
+POST https://esm.do/@math/add
+Content-Type: application/json
+
+{
+  "types": "export declare function add(a: number, b: number): number",
+  "module": "export function add(a, b) { return a + b }",
+  "tests": "describe('add', () => { it('works', () => expect(add(1,2)).toBe(3)) })",
+  "script": "return add(10, 20)"
+}
+```
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `types` | `string` | Yes | TypeScript type declarations |
+| `module` | `string` | Yes | ESM implementation code |
+| `tests` | `string` | No | Vitest-compatible test code |
+| `script` | `string` | No | Executable script |
+
+**Response:**
+
+```json
+{
+  "name": "@math/add",
+  "version": "a3f2dd1b7c4ee2",
+  "testResults": {
+    "passed": 1,
+    "failed": 0,
+    "total": 1,
+    "duration": 15,
+    "results": [
+      {
+        "name": "works",
+        "passed": true,
+        "duration": 2
+      }
+    ]
+  },
+  "value": 30
+}
+```
+
+**Status Codes:**
+
+| Code | Description |
+|------|-------------|
+| 201 | Module created successfully |
+| 200 | Module updated successfully |
+| 400 | Invalid request body or validation error |
+| 422 | Tests failed - module not saved |
+
+<Callout type="warning">
+  If tests are provided and they fail, the module will NOT be saved. The response will include test failure details.
+</Callout>
+
+---
+
+### POST /:name/test
+
+Run tests for an existing module.
+
+**Request:**
+
+```bash
+POST https://esm.do/@math/add/test
+```
+
+**Response:**
+
+```json
+{
+  "passed": 3,
+  "failed": 0,
+  "total": 3,
+  "duration": 45,
+  "results": [
+    {
+      "name": "adds positive numbers",
+      "passed": true,
+      "duration": 2
+    },
+    {
+      "name": "adds negative numbers",
+      "passed": true,
+      "duration": 1
+    },
+    {
+      "name": "adds zero",
+      "passed": true,
+      "duration": 1
+    }
+  ]
+}
+```
+
+**Status Codes:**
+
+| Code | Description |
+|------|-------------|
+| 200 | Tests executed successfully |
+| 404 | Module not found |
+| 400 | Module has no tests |
+
+---
+
+### POST /:name/run
+
+Execute a module's script.
+
+**Request:**
+
+```bash
+POST https://esm.do/@math/add/run
+Content-Type: application/json
+
+{
+  "args": {
+    "x": 5,
+    "y": 10
+  }
+}
+```
+
+**Request Body (optional):**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `args` | `object` | No | Arguments available as `args` in the script |
+
+**Response:**
+
+```json
+{
+  "value": 30,
+  "logs": [
+    "Starting calculation...",
+    "Result: 30"
+  ],
+  "errors": []
+}
+```
+
+**Status Codes:**
+
+| Code | Description |
+|------|-------------|
+| 200 | Script executed successfully |
+| 404 | Module not found |
+| 400 | Module has no script |
+| 500 | Script execution error |
+
+---
+
+### DELETE /:name
+
+Delete a module and all its versions.
+
+**Request:**
+
+```bash
+DELETE https://esm.do/@math/add
+```
+
+**Response:**
+
+```json
+{
+  "deleted": true,
+  "name": "@math/add"
+}
+```
+
+**Status Codes:**
+
+| Code | Description |
+|------|-------------|
+| 200 | Module deleted successfully |
+| 404 | Module not found |
+
+---
+
+## Listing Modules
+
+### GET /list
+
+List all modules or filter by pattern.
+
+**Request:**
+
+```bash
+# List all modules
+GET https://esm.do/list
+
+# Filter by scope
+GET https://esm.do/list?pattern=@math/*
+
+# Filter by name pattern
+GET https://esm.do/list?pattern=*-utils
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pattern` | `string` | No | Glob pattern to filter modules |
+
+**Response:**
+
+```json
+{
+  "modules": [
+    "@math/add",
+    "@math/subtract",
+    "@math/multiply",
+    "@math/divide"
+  ],
+  "count": 4
+}
+```
+
+---
+
+## Version History
+
+### GET /:name/versions
+
+Get the version history for a module.
+
+**Request:**
+
+```bash
+GET https://esm.do/@math/add/versions
+```
+
+**Response:**
+
+```json
+{
+  "name": "@math/add",
+  "versions": [
+    {
+      "version": "b7c4ee2",
+      "message": "Add edge case tests",
+      "timestamp": "2024-01-15T11:00:00Z"
+    },
+    {
+      "version": "a3f2dd1",
+      "message": "Initial implementation",
+      "timestamp": "2024-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+---
+
+### GET /:name/diff
+
+Compare two versions of a module.
+
+**Request:**
+
+```bash
+GET https://esm.do/@math/add/diff?from=a3f2dd1&to=b7c4ee2
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `from` | `string` | Yes | Source version hash |
+| `to` | `string` | Yes | Target version hash |
+
+**Response:**
+
+```json
+{
+  "name": "@math/add",
+  "from": "a3f2dd1",
+  "to": "b7c4ee2",
+  "changes": {
+    "types": {
+      "added": [],
+      "removed": [],
+      "modified": false
+    },
+    "module": {
+      "added": ["+ export function abs(n) { return Math.abs(n) }"],
+      "removed": [],
+      "modified": true
+    },
+    "tests": {
+      "added": ["+ it('handles absolute value', () => expect(abs(-5)).toBe(5))"],
+      "removed": [],
+      "modified": true
+    },
+    "script": {
+      "added": [],
+      "removed": [],
+      "modified": false
+    }
+  }
+}
+```
+
+---
+
+## Error Responses
+
+All error responses follow this format:
+
+```json
+{
+  "error": {
+    "code": "MODULE_NOT_FOUND",
+    "message": "Module @math/nonexistent not found"
+  }
+}
+```
+
+### Error Codes
+
+| Code | Description |
+|------|-------------|
+| `MODULE_NOT_FOUND` | The requested module does not exist |
+| `VERSION_NOT_FOUND` | The requested version does not exist |
+| `VALIDATION_ERROR` | Request body validation failed |
+| `TYPE_ERROR` | Type declaration validation failed |
+| `TEST_FAILURE` | Tests failed during write operation |
+| `SCRIPT_ERROR` | Script execution failed |
+| `INTERNAL_ERROR` | Internal server error |
+
+---
+
+## CORS
+
+All endpoints support CORS with the following headers:
+
+```
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
+Access-Control-Allow-Headers: Content-Type, Authorization
+```
+
+---
+
+## Rate Limiting
+
+<Callout type="info">
+  Rate limiting details coming soon.
+</Callout>
+
+---
+
+## Next Steps
+
+- [SDK Client Reference](/api/sdk) - Type-safe TypeScript client
+- [Module Concepts](/concepts/modules) - Understanding module structure
+- [Examples](/examples) - Real-world usage examples

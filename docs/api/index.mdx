@@ -1,0 +1,317 @@
+---
+title: API Reference
+description: Complete API reference for esm.do HTTP routes, SDK, and MCP tools
+---
+
+# API Reference
+
+esm.do provides multiple ways to interact with the module system:
+
+## Access Methods
+
+| Method | Use Case | Description |
+|--------|----------|-------------|
+| [HTTP API](/api/routes) | Direct integration | RESTful endpoints for module CRUD operations |
+| [SDK Client](/api/sdk) | TypeScript/JavaScript | Type-safe client library |
+| [CLI](#cli-commands) | Command line | Terminal-based module management |
+| [MCP Tools](#mcp-tools) | AI agents | Model Context Protocol tools for programmatic access |
+
+## HTTP API
+
+The HTTP API exposes RESTful endpoints at `https://esm.do`:
+
+```bash
+# Read module
+GET https://esm.do/@scope/module
+
+# Read specific file
+GET https://esm.do/@scope/module.d.ts
+GET https://esm.do/@scope/module.mjs
+GET https://esm.do/@scope/module.test.js
+GET https://esm.do/@scope/module.script.js
+
+# Read specific version
+GET https://esm.do/@scope/module@version
+
+# Create/update module
+POST https://esm.do/@scope/module
+
+# Run tests
+POST https://esm.do/@scope/module/test
+
+# Execute script
+POST https://esm.do/@scope/module/run
+
+# Delete module
+DELETE https://esm.do/@scope/module
+```
+
+[View full HTTP API documentation](/api/routes)
+
+## SDK Client
+
+The TypeScript SDK provides a type-safe interface:
+
+```typescript
+import { esm } from 'esm.do'
+
+// Write a module
+const result = await esm.write({
+  name: '@math/add',
+  types: 'export declare function add(a: number, b: number): number',
+  module: 'export function add(a, b) { return a + b }',
+  tests: 'it("works", () => expect(add(1,2)).toBe(3))',
+  script: 'return add(10, 20)'
+})
+
+// Read a module
+const module = await esm.read('@math/add')
+
+// Run tests
+const testResult = await esm.test('@math/add')
+
+// Execute script
+const runResult = await esm.run('@math/add', { arg: 'value' })
+
+// Delete module
+await esm.delete('@math/add')
+```
+
+[View full SDK documentation](/api/sdk)
+
+## CLI Commands
+
+The CLI provides command-line access to all module operations:
+
+```bash
+# Initialize a new module
+esm init @scope/module
+
+# Write module files
+esm write @scope/module --types="..." --module="..."
+
+# Read module
+esm read @scope/module
+
+# Run tests
+esm test @scope/module
+
+# Execute script
+esm run @scope/module
+
+# View version history
+esm log @scope/module
+
+# Compare versions
+esm diff @scope/module@v1 @scope/module@v2
+```
+
+### Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `esm init <name>` | Initialize a new module |
+| `esm write <name>` | Create or update a module |
+| `esm read <name>` | Read module contents |
+| `esm test <name>` | Run module tests |
+| `esm run <name>` | Execute module script |
+| `esm log <name>` | View version history |
+| `esm diff <v1> <v2>` | Compare two versions |
+| `esm delete <name>` | Delete a module |
+
+## MCP Tools
+
+esm.do provides Model Context Protocol (MCP) tools for AI agent integration:
+
+```typescript
+// Available MCP tools
+esm_list     // List modules matching pattern
+esm_read     // Read module contents
+esm_write    // Create or update module
+esm_test     // Run module tests
+esm_run      // Execute module script
+esm_versions // Get version history
+esm_diff     // Compare versions
+esm_delete   // Remove module
+```
+
+### Tool Definitions
+
+#### esm_list
+
+List modules matching a pattern.
+
+```json
+{
+  "name": "esm_list",
+  "arguments": {
+    "pattern": "@math/*"
+  }
+}
+```
+
+#### esm_read
+
+Read a module's contents.
+
+```json
+{
+  "name": "esm_read",
+  "arguments": {
+    "name": "@math/add",
+    "version": "optional-version-hash"
+  }
+}
+```
+
+#### esm_write
+
+Create or update a module.
+
+```json
+{
+  "name": "esm_write",
+  "arguments": {
+    "name": "@math/add",
+    "types": "export declare function add(a: number, b: number): number",
+    "module": "export function add(a, b) { return a + b }",
+    "tests": "describe('add', () => { it('works', () => expect(add(1,2)).toBe(3)) })",
+    "script": "return add(10, 20)"
+  }
+}
+```
+
+#### esm_test
+
+Run a module's tests.
+
+```json
+{
+  "name": "esm_test",
+  "arguments": {
+    "name": "@math/add"
+  }
+}
+```
+
+#### esm_run
+
+Execute a module's script.
+
+```json
+{
+  "name": "esm_run",
+  "arguments": {
+    "name": "@math/add",
+    "args": { "x": 5, "y": 10 }
+  }
+}
+```
+
+#### esm_versions
+
+Get version history for a module.
+
+```json
+{
+  "name": "esm_versions",
+  "arguments": {
+    "name": "@math/add"
+  }
+}
+```
+
+#### esm_diff
+
+Compare two versions of a module.
+
+```json
+{
+  "name": "esm_diff",
+  "arguments": {
+    "name": "@math/add",
+    "from": "abc123",
+    "to": "def456"
+  }
+}
+```
+
+#### esm_delete
+
+Delete a module.
+
+```json
+{
+  "name": "esm_delete",
+  "arguments": {
+    "name": "@math/add"
+  }
+}
+```
+
+## Core Types
+
+The API uses these core TypeScript types:
+
+### ESMModule
+
+```typescript
+interface ESMModule {
+  name: string       // @scope/module-name
+  types: string      // TypeScript declarations
+  module: string     // ESM implementation
+  tests: string      // Test code
+  script: string     // Executable script
+  version: string    // Git commit SHA
+  createdAt: Date
+  updatedAt: Date
+}
+```
+
+### ESMWriteOptions
+
+```typescript
+interface ESMWriteOptions {
+  name: string       // Required: module name
+  types: string      // Required: type declarations
+  module: string     // Required: implementation
+  tests?: string     // Optional: test code
+  script?: string    // Optional: executable script
+}
+```
+
+### ESMTestResult
+
+```typescript
+interface ESMTestResult {
+  passed: number
+  failed: number
+  total: number
+  duration: number
+  results: TestCaseResult[]
+  failures?: TestCaseResult[]
+}
+
+interface TestCaseResult {
+  name: string
+  passed: boolean
+  duration: number
+  error?: string
+}
+```
+
+### ESMRunResult
+
+```typescript
+interface ESMRunResult {
+  value: unknown     // Script return value
+  logs: string[]     // Console output
+  errors: string[]   // Error messages
+}
+```
+
+## Next Steps
+
+- [HTTP Routes Reference](/api/routes) - Detailed HTTP API documentation
+- [SDK Client Reference](/api/sdk) - TypeScript SDK documentation
+- [Module Concepts](/concepts/modules) - Understanding the module system

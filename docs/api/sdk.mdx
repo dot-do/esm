@@ -1,0 +1,454 @@
+---
+title: SDK Client
+description: TypeScript SDK reference for esm.do module operations
+---
+
+# SDK Client
+
+The esm.do SDK provides a type-safe TypeScript client for interacting with the module system.
+
+## Installation
+
+```bash
+npm install esm.do
+```
+
+## Quick Start
+
+```typescript
+import { esm } from 'esm.do'
+
+// Create a module
+const result = await esm.write({
+  name: '@math/add',
+  types: `export declare function add(a: number, b: number): number`,
+  module: `export function add(a, b) { return a + b }`,
+})
+
+// Read the module
+const module = await esm.read('@math/add')
+console.log(module.types)
+```
+
+## Client Configuration
+
+### Default Client
+
+The default export uses the production esm.do API:
+
+```typescript
+import { esm } from 'esm.do'
+
+// Uses https://esm.do by default
+await esm.read('@math/add')
+```
+
+### Custom Client
+
+Create a custom client with specific configuration:
+
+```typescript
+import { ESM } from 'esm.do/client'
+
+const esm = new ESM({
+  baseUrl: 'https://esm.do',
+  // Additional configuration options
+})
+```
+
+## Core Methods
+
+### `esm.write(options)`
+
+Create or update a module.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `options.name` | `string` | Yes | Module name (e.g., `@scope/module`) |
+| `options.types` | `string` | Yes | TypeScript type declarations |
+| `options.module` | `string` | Yes | ESM implementation code |
+| `options.tests` | `string` | No | Vitest-compatible test code |
+| `options.script` | `string` | No | Executable script |
+
+**Returns:** `Promise<ESMWriteResult>`
+
+```typescript
+interface ESMWriteResult {
+  name: string
+  version: string
+  testResults?: {
+    passed: number
+    failed: number
+    total: number
+    duration: number
+    results: TestCaseResult[]
+  }
+  value?: unknown  // Script return value if script was provided
+}
+```
+
+**Example:**
+
+```typescript
+const result = await esm.write({
+  name: '@math/calculator',
+  types: `
+    export declare function add(a: number, b: number): number
+    export declare function subtract(a: number, b: number): number
+  `,
+  module: `
+    export function add(a, b) { return a + b }
+    export function subtract(a, b) { return a - b }
+  `,
+  tests: `
+    describe('calculator', () => {
+      it('adds numbers', () => expect(add(2, 3)).toBe(5))
+      it('subtracts numbers', () => expect(subtract(5, 2)).toBe(3))
+    })
+  `,
+  script: `return add(10, subtract(20, 5))`
+})
+
+console.log(result.version)          // 'a3f2dd1...'
+console.log(result.testResults.passed) // 2
+console.log(result.value)            // 25
+```
+
+<Callout type="warning">
+  If tests are provided and fail, the write operation will throw an error and the module will NOT be saved.
+</Callout>
+
+---
+
+### `esm.read(name, version?)`
+
+Read a module's contents.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `string` | Yes | Module name |
+| `version` | `string` | No | Specific version hash (defaults to latest) |
+
+**Returns:** `Promise<ESMReadResult>`
+
+```typescript
+interface ESMReadResult {
+  name: string
+  types: string
+  module: string
+  tests: string
+  script: string
+  version: string
+  createdAt: Date
+  updatedAt: Date
+}
+```
+
+**Example:**
+
+```typescript
+// Read latest version
+const module = await esm.read('@math/add')
+console.log(module.types)
+console.log(module.module)
+
+// Read specific version
+const oldVersion = await esm.read('@math/add', 'a3f2dd1')
+console.log(oldVersion.module)
+```
+
+**Throws:** `ModuleNotFoundError` if the module doesn't exist.
+
+---
+
+### `esm.test(name)`
+
+Run tests for an existing module.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `string` | Yes | Module name |
+
+**Returns:** `Promise<ESMTestResult>`
+
+```typescript
+interface ESMTestResult {
+  passed: number
+  failed: number
+  total: number
+  duration: number
+  results: TestCaseResult[]
+  failures?: TestCaseResult[]
+}
+
+interface TestCaseResult {
+  name: string
+  passed: boolean
+  status: 'passed' | 'failed'
+  duration: number
+  error?: string
+}
+```
+
+**Example:**
+
+```typescript
+const testResult = await esm.test('@math/calculator')
+
+console.log(`${testResult.passed}/${testResult.total} tests passed`)
+
+if (testResult.failed > 0) {
+  console.log('Failures:')
+  testResult.failures?.forEach(f => {
+    console.log(`  - ${f.name}: ${f.error}`)
+  })
+}
+```
+
+**Throws:**
+- `ModuleNotFoundError` if the module doesn't exist
+- `NoTestsError` if the module has no tests
+
+---
+
+### `esm.run(name, args?)`
+
+Execute a module's script.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `string` | Yes | Module name |
+| `args` | `object` | No | Arguments available as `args` in the script |
+
+**Returns:** `Promise<ESMRunResult>`
+
+```typescript
+interface ESMRunResult {
+  value: unknown    // Script return value
+  logs: string[]    // Console.log output
+  errors: string[]  // Console.error output
+}
+```
+
+**Example:**
+
+```typescript
+// Run without arguments
+const result = await esm.run('@math/calculator')
+console.log(result.value) // 25
+
+// Run with arguments
+const result = await esm.run('@greet/hello', { name: 'World' })
+console.log(result.value) // 'Hello, World!'
+
+// Access logs
+result.logs.forEach(log => console.log(log))
+```
+
+**Throws:**
+- `ModuleNotFoundError` if the module doesn't exist
+- `NoScriptError` if the module has no script
+- `ScriptExecutionError` if script execution fails
+
+---
+
+### `esm.delete(name)`
+
+Delete a module and all its versions.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `string` | Yes | Module name |
+
+**Returns:** `Promise<ESMDeleteResult>`
+
+```typescript
+interface ESMDeleteResult {
+  deleted: boolean
+  name: string
+}
+```
+
+**Example:**
+
+```typescript
+const result = await esm.delete('@math/old-module')
+console.log(result.deleted) // true
+```
+
+**Throws:** `ModuleNotFoundError` if the module doesn't exist.
+
+---
+
+### `esm.list(pattern?)`
+
+List modules matching a pattern.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pattern` | `string` | No | Glob pattern to filter modules |
+
+**Returns:** `Promise<string[]>`
+
+**Example:**
+
+```typescript
+// List all modules
+const all = await esm.list()
+console.log(all) // ['@math/add', '@math/subtract', '@utils/string', ...]
+
+// Filter by scope
+const mathModules = await esm.list('@math/*')
+console.log(mathModules) // ['@math/add', '@math/subtract', '@math/multiply']
+
+// Filter by name pattern
+const utils = await esm.list('*-utils')
+console.log(utils) // ['@string/format-utils', '@date/parse-utils']
+```
+
+---
+
+### `esm.versions(name)`
+
+Get version history for a module.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `string` | Yes | Module name |
+
+**Returns:** `Promise<ModuleVersion[]>`
+
+```typescript
+interface ModuleVersion {
+  version: string    // Commit SHA
+  message: string    // Commit message
+  timestamp: Date    // When this version was created
+}
+```
+
+**Example:**
+
+```typescript
+const versions = await esm.versions('@math/add')
+
+versions.forEach(v => {
+  console.log(`${v.version} - ${v.message} (${v.timestamp})`)
+})
+// Output:
+// b7c4ee2 - Add edge case tests (2024-01-15T11:00:00Z)
+// a3f2dd1 - Initial implementation (2024-01-15T10:30:00Z)
+```
+
+---
+
+### `esm.diff(name, from, to)`
+
+Compare two versions of a module.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `string` | Yes | Module name |
+| `from` | `string` | Yes | Source version hash |
+| `to` | `string` | Yes | Target version hash |
+
+**Returns:** `Promise<ESMDiffResult>`
+
+**Example:**
+
+```typescript
+const diff = await esm.diff('@math/add', 'a3f2dd1', 'b7c4ee2')
+
+console.log('Module changes:', diff.changes.module.modified)
+console.log('Tests changes:', diff.changes.tests.modified)
+```
+
+---
+
+## Error Handling
+
+The SDK throws typed errors for different failure scenarios:
+
+```typescript
+import {
+  ESMError,
+  ModuleNotFoundError,
+  ValidationError,
+  TestFailureError,
+  ScriptExecutionError
+} from 'esm.do'
+
+try {
+  await esm.write({
+    name: '@test/module',
+    types: '...',
+    module: '...',
+    tests: '...'
+  })
+} catch (error) {
+  if (error instanceof TestFailureError) {
+    console.log('Tests failed:', error.testResults)
+  } else if (error instanceof ValidationError) {
+    console.log('Validation error:', error.message)
+  } else if (error instanceof ModuleNotFoundError) {
+    console.log('Module not found:', error.name)
+  } else {
+    throw error
+  }
+}
+```
+
+### Error Types
+
+| Error Class | Description |
+|-------------|-------------|
+| `ESMError` | Base error class |
+| `ModuleNotFoundError` | Module does not exist |
+| `VersionNotFoundError` | Specified version does not exist |
+| `ValidationError` | Invalid input (name, types, module) |
+| `TestFailureError` | Tests failed during write |
+| `NoTestsError` | Module has no tests |
+| `NoScriptError` | Module has no script |
+| `ScriptExecutionError` | Script threw an error |
+
+---
+
+## TypeScript Types
+
+Import types directly from the package:
+
+```typescript
+import type {
+  ESMModule,
+  ESMWriteOptions,
+  ESMReadResult,
+  ESMRunResult,
+  ESMTestResult,
+  TestCaseResult,
+  ModuleVersion,
+} from 'esm.do'
+```
+
+---
+
+## Next Steps
+
+- [HTTP Routes Reference](/api/routes) - Direct API access
+- [Module Concepts](/concepts/modules) - Understanding module structure
+- [Versioning](/concepts/versioning) - How versioning works
+- [Examples](/examples) - Real-world usage examples

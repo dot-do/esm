@@ -1,0 +1,652 @@
+---
+title: Examples
+description: Real-world examples of esm.do modules and usage patterns
+---
+
+# Examples
+
+This page demonstrates real-world usage patterns for esm.do modules.
+
+## Basic Examples
+
+### Simple Math Module
+
+A basic calculator module with full test coverage:
+
+```typescript
+await esm.write({
+  name: '@math/calculator',
+  types: `
+    export declare function add(a: number, b: number): number
+    export declare function subtract(a: number, b: number): number
+    export declare function multiply(a: number, b: number): number
+    export declare function divide(a: number, b: number): number
+  `,
+  module: `
+    export function add(a, b) { return a + b }
+    export function subtract(a, b) { return a - b }
+    export function multiply(a, b) { return a * b }
+    export function divide(a, b) {
+      if (b === 0) throw new Error('Division by zero')
+      return a / b
+    }
+  `,
+  tests: `
+    describe('calculator', () => {
+      describe('add', () => {
+        it('adds positive numbers', () => expect(add(2, 3)).toBe(5))
+        it('adds negative numbers', () => expect(add(-1, -2)).toBe(-3))
+        it('handles zero', () => expect(add(0, 5)).toBe(5))
+      })
+
+      describe('subtract', () => {
+        it('subtracts numbers', () => expect(subtract(5, 3)).toBe(2))
+        it('handles negative result', () => expect(subtract(3, 5)).toBe(-2))
+      })
+
+      describe('multiply', () => {
+        it('multiplies numbers', () => expect(multiply(4, 3)).toBe(12))
+        it('handles zero', () => expect(multiply(5, 0)).toBe(0))
+      })
+
+      describe('divide', () => {
+        it('divides numbers', () => expect(divide(10, 2)).toBe(5))
+        it('throws on division by zero', () => {
+          expect(() => divide(1, 0)).toThrow('Division by zero')
+        })
+      })
+    })
+  `,
+  script: `
+    const a = 100
+    const b = 25
+    return {
+      sum: add(a, b),
+      difference: subtract(a, b),
+      product: multiply(a, b),
+      quotient: divide(a, b)
+    }
+  `
+})
+```
+
+---
+
+### String Utilities
+
+A module for common string operations:
+
+```typescript
+await esm.write({
+  name: '@utils/string',
+  types: `
+    export declare function capitalize(str: string): string
+    export declare function slugify(str: string): string
+    export declare function truncate(str: string, length: number): string
+    export declare function reverse(str: string): string
+  `,
+  module: `
+    export function capitalize(str) {
+      if (!str) return ''
+      return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase()
+    }
+
+    export function slugify(str) {
+      return str
+        .toLowerCase()
+        .trim()
+        .replace(/[^\\w\\s-]/g, '')
+        .replace(/[\\s_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+    }
+
+    export function truncate(str, length) {
+      if (str.length <= length) return str
+      return str.slice(0, length - 3) + '...'
+    }
+
+    export function reverse(str) {
+      return str.split('').reverse().join('')
+    }
+  `,
+  tests: `
+    describe('string utilities', () => {
+      describe('capitalize', () => {
+        it('capitalizes first letter', () => {
+          expect(capitalize('hello')).toBe('Hello')
+        })
+        it('lowercases rest', () => {
+          expect(capitalize('HELLO')).toBe('Hello')
+        })
+        it('handles empty string', () => {
+          expect(capitalize('')).toBe('')
+        })
+      })
+
+      describe('slugify', () => {
+        it('converts to lowercase', () => {
+          expect(slugify('Hello World')).toBe('hello-world')
+        })
+        it('removes special characters', () => {
+          expect(slugify('Hello! World?')).toBe('hello-world')
+        })
+        it('handles multiple spaces', () => {
+          expect(slugify('hello   world')).toBe('hello-world')
+        })
+      })
+
+      describe('truncate', () => {
+        it('truncates long strings', () => {
+          expect(truncate('Hello World', 8)).toBe('Hello...')
+        })
+        it('keeps short strings', () => {
+          expect(truncate('Hi', 10)).toBe('Hi')
+        })
+      })
+
+      describe('reverse', () => {
+        it('reverses string', () => {
+          expect(reverse('hello')).toBe('olleh')
+        })
+      })
+    })
+  `
+})
+```
+
+---
+
+## Intermediate Examples
+
+### Module with Dependencies
+
+A statistics module that depends on the calculator:
+
+```typescript
+// First, create the base module
+await esm.write({
+  name: '@math/calculator',
+  types: `
+    export declare function add(a: number, b: number): number
+    export declare function divide(a: number, b: number): number
+  `,
+  module: `
+    export function add(a, b) { return a + b }
+    export function divide(a, b) { return a / b }
+  `
+})
+
+// Then, create the dependent module
+await esm.write({
+  name: '@math/stats',
+  types: `
+    export declare function sum(numbers: number[]): number
+    export declare function mean(numbers: number[]): number
+    export declare function median(numbers: number[]): number
+    export declare function variance(numbers: number[]): number
+  `,
+  module: `
+    import { add, divide } from 'esm.do/@math/calculator'
+
+    export function sum(numbers) {
+      return numbers.reduce((acc, n) => add(acc, n), 0)
+    }
+
+    export function mean(numbers) {
+      return divide(sum(numbers), numbers.length)
+    }
+
+    export function median(numbers) {
+      const sorted = [...numbers].sort((a, b) => a - b)
+      const mid = Math.floor(sorted.length / 2)
+      if (sorted.length % 2 === 0) {
+        return divide(add(sorted[mid - 1], sorted[mid]), 2)
+      }
+      return sorted[mid]
+    }
+
+    export function variance(numbers) {
+      const avg = mean(numbers)
+      const squaredDiffs = numbers.map(n => {
+        const diff = n - avg
+        return diff * diff
+      })
+      return mean(squaredDiffs)
+    }
+  `,
+  tests: `
+    describe('statistics', () => {
+      const numbers = [1, 2, 3, 4, 5]
+
+      it('calculates sum', () => {
+        expect(sum(numbers)).toBe(15)
+      })
+
+      it('calculates mean', () => {
+        expect(mean(numbers)).toBe(3)
+      })
+
+      it('calculates median for odd length', () => {
+        expect(median(numbers)).toBe(3)
+      })
+
+      it('calculates median for even length', () => {
+        expect(median([1, 2, 3, 4])).toBe(2.5)
+      })
+
+      it('calculates variance', () => {
+        expect(variance(numbers)).toBe(2)
+      })
+    })
+  `,
+  script: `
+    const data = [10, 20, 30, 40, 50]
+    return {
+      sum: sum(data),
+      mean: mean(data),
+      median: median(data),
+      variance: variance(data)
+    }
+  `
+})
+```
+
+---
+
+### Class-Based Module
+
+A module exporting a class with methods:
+
+```typescript
+await esm.write({
+  name: '@data/stack',
+  types: `
+    export declare class Stack<T> {
+      constructor()
+      push(item: T): void
+      pop(): T | undefined
+      peek(): T | undefined
+      isEmpty(): boolean
+      size(): number
+      clear(): void
+    }
+  `,
+  module: `
+    export class Stack {
+      constructor() {
+        this.items = []
+      }
+
+      push(item) {
+        this.items.push(item)
+      }
+
+      pop() {
+        return this.items.pop()
+      }
+
+      peek() {
+        return this.items[this.items.length - 1]
+      }
+
+      isEmpty() {
+        return this.items.length === 0
+      }
+
+      size() {
+        return this.items.length
+      }
+
+      clear() {
+        this.items = []
+      }
+    }
+  `,
+  tests: `
+    describe('Stack', () => {
+      let stack
+
+      beforeEach(() => {
+        stack = new Stack()
+      })
+
+      describe('push/pop', () => {
+        it('pushes items', () => {
+          stack.push(1)
+          stack.push(2)
+          expect(stack.size()).toBe(2)
+        })
+
+        it('pops items in LIFO order', () => {
+          stack.push(1)
+          stack.push(2)
+          expect(stack.pop()).toBe(2)
+          expect(stack.pop()).toBe(1)
+        })
+
+        it('returns undefined when empty', () => {
+          expect(stack.pop()).toBeUndefined()
+        })
+      })
+
+      describe('peek', () => {
+        it('returns top item without removing', () => {
+          stack.push(1)
+          stack.push(2)
+          expect(stack.peek()).toBe(2)
+          expect(stack.size()).toBe(2)
+        })
+      })
+
+      describe('isEmpty', () => {
+        it('returns true when empty', () => {
+          expect(stack.isEmpty()).toBe(true)
+        })
+
+        it('returns false when not empty', () => {
+          stack.push(1)
+          expect(stack.isEmpty()).toBe(false)
+        })
+      })
+
+      describe('clear', () => {
+        it('removes all items', () => {
+          stack.push(1)
+          stack.push(2)
+          stack.clear()
+          expect(stack.isEmpty()).toBe(true)
+        })
+      })
+    })
+  `,
+  script: `
+    const stack = new Stack()
+    stack.push('first')
+    stack.push('second')
+    stack.push('third')
+
+    const results = []
+    while (!stack.isEmpty()) {
+      results.push(stack.pop())
+    }
+
+    return results // ['third', 'second', 'first']
+  `
+})
+```
+
+---
+
+## Advanced Examples
+
+### Async Operations
+
+A module with async functions:
+
+```typescript
+await esm.write({
+  name: '@async/utils',
+  types: `
+    export declare function delay(ms: number): Promise<void>
+    export declare function retry<T>(
+      fn: () => Promise<T>,
+      attempts: number
+    ): Promise<T>
+    export declare function timeout<T>(
+      promise: Promise<T>,
+      ms: number
+    ): Promise<T>
+  `,
+  module: `
+    export function delay(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms))
+    }
+
+    export async function retry(fn, attempts) {
+      let lastError
+      for (let i = 0; i < attempts; i++) {
+        try {
+          return await fn()
+        } catch (error) {
+          lastError = error
+          if (i < attempts - 1) {
+            await delay(100 * Math.pow(2, i)) // Exponential backoff
+          }
+        }
+      }
+      throw lastError
+    }
+
+    export function timeout(promise, ms) {
+      return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Timeout')), ms)
+        )
+      ])
+    }
+  `,
+  tests: `
+    describe('async utilities', () => {
+      describe('delay', () => {
+        it('delays execution', async () => {
+          const start = Date.now()
+          await delay(50)
+          const elapsed = Date.now() - start
+          expect(elapsed).toBeGreaterThanOrEqual(45)
+        })
+      })
+
+      describe('retry', () => {
+        it('retries on failure', async () => {
+          let attempts = 0
+          const fn = async () => {
+            attempts++
+            if (attempts < 3) throw new Error('Not yet')
+            return 'success'
+          }
+
+          const result = await retry(fn, 3)
+          expect(result).toBe('success')
+          expect(attempts).toBe(3)
+        })
+
+        it('throws after max attempts', async () => {
+          const fn = async () => { throw new Error('Always fails') }
+          await expect(retry(fn, 2)).rejects.toThrow('Always fails')
+        })
+      })
+
+      describe('timeout', () => {
+        it('resolves if fast enough', async () => {
+          const result = await timeout(
+            Promise.resolve('done'),
+            100
+          )
+          expect(result).toBe('done')
+        })
+
+        it('rejects on timeout', async () => {
+          await expect(
+            timeout(delay(200), 50)
+          ).rejects.toThrow('Timeout')
+        })
+      })
+    })
+  `
+})
+```
+
+---
+
+### Script with Arguments
+
+A module that processes arguments:
+
+```typescript
+await esm.write({
+  name: '@tools/formatter',
+  types: `
+    export declare function formatDate(date: Date, format: string): string
+    export declare function formatNumber(num: number, decimals?: number): string
+    export declare function formatCurrency(
+      amount: number,
+      currency?: string
+    ): string
+  `,
+  module: `
+    export function formatDate(date, format) {
+      const d = new Date(date)
+      const map = {
+        YYYY: d.getFullYear(),
+        MM: String(d.getMonth() + 1).padStart(2, '0'),
+        DD: String(d.getDate()).padStart(2, '0'),
+        HH: String(d.getHours()).padStart(2, '0'),
+        mm: String(d.getMinutes()).padStart(2, '0'),
+        ss: String(d.getSeconds()).padStart(2, '0')
+      }
+      return format.replace(/YYYY|MM|DD|HH|mm|ss/g, match => map[match])
+    }
+
+    export function formatNumber(num, decimals = 2) {
+      return num.toLocaleString('en-US', {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals
+      })
+    }
+
+    export function formatCurrency(amount, currency = 'USD') {
+      return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency
+      }).format(amount)
+    }
+  `,
+  tests: `
+    describe('formatter', () => {
+      describe('formatDate', () => {
+        it('formats dates', () => {
+          const date = new Date('2024-03-15T10:30:00')
+          expect(formatDate(date, 'YYYY-MM-DD')).toBe('2024-03-15')
+          expect(formatDate(date, 'DD/MM/YYYY')).toBe('15/03/2024')
+        })
+      })
+
+      describe('formatNumber', () => {
+        it('formats with decimals', () => {
+          expect(formatNumber(1234.5, 2)).toBe('1,234.50')
+        })
+      })
+
+      describe('formatCurrency', () => {
+        it('formats USD', () => {
+          expect(formatCurrency(1234.50)).toBe('$1,234.50')
+        })
+        it('formats EUR', () => {
+          expect(formatCurrency(1234.50, 'EUR')).toContain('1,234.50')
+        })
+      })
+    })
+  `,
+  script: `
+    // Process arguments passed to the script
+    const { date, amount, currency = 'USD' } = args || {}
+
+    const results = {}
+
+    if (date) {
+      results.formatted_date = formatDate(new Date(date), 'YYYY-MM-DD')
+      results.formatted_datetime = formatDate(new Date(date), 'YYYY-MM-DD HH:mm:ss')
+    }
+
+    if (amount !== undefined) {
+      results.formatted_number = formatNumber(amount)
+      results.formatted_currency = formatCurrency(amount, currency)
+    }
+
+    return results
+  `
+})
+
+// Execute with arguments
+const result = await esm.run('@tools/formatter', {
+  date: '2024-03-15T10:30:00Z',
+  amount: 1234.56,
+  currency: 'EUR'
+})
+
+console.log(result.value)
+// {
+//   formatted_date: '2024-03-15',
+//   formatted_datetime: '2024-03-15 10:30:00',
+//   formatted_number: '1,234.56',
+//   formatted_currency: '...'
+// }
+```
+
+---
+
+## Usage Patterns
+
+### Error Handling
+
+```typescript
+import { esm, TestFailureError, ModuleNotFoundError } from 'esm.do'
+
+async function safeWrite(options) {
+  try {
+    return await esm.write(options)
+  } catch (error) {
+    if (error instanceof TestFailureError) {
+      console.error('Tests failed:')
+      error.testResults.failures.forEach(f => {
+        console.error(`  - ${f.name}: ${f.error}`)
+      })
+    }
+    throw error
+  }
+}
+
+async function safeRead(name) {
+  try {
+    return await esm.read(name)
+  } catch (error) {
+    if (error instanceof ModuleNotFoundError) {
+      console.log(`Module ${name} not found, creating...`)
+      return null
+    }
+    throw error
+  }
+}
+```
+
+### Version Pinning in Production
+
+```javascript
+// @production/app.mjs
+
+// Pin dependencies to specific versions for stability
+import { add } from 'esm.do/@math/calculator@a3f2dd1'
+import { slugify } from 'esm.do/@utils/string@b7c4ee2'
+
+// Your application code...
+```
+
+### Module Discovery
+
+```typescript
+// List all math modules
+const mathModules = await esm.list('@math/*')
+console.log(mathModules) // ['@math/calculator', '@math/stats', ...]
+
+// List all modules
+const allModules = await esm.list()
+console.log(allModules)
+```
+
+## Next Steps
+
+- [Getting Started](/getting-started) - Installation and setup
+- [SDK Reference](/api/sdk) - Complete API documentation
+- [Module Concepts](/concepts/modules) - Understanding modules
+- [Versioning](/concepts/versioning) - Version management
