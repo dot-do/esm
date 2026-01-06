@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { GitxStorage } from '../../src/storage/gitx.js'
+import { GitxStorage, StorageTraceHook } from '../../src/storage/gitx.js'
 import type { GitxClient, StoredModule, ModuleVersion } from '../../src/storage/types.js'
 
 /**
@@ -20,23 +20,27 @@ function createMockGitxClient(): GitxClient {
   const trees = new Map<string, Record<string, string>>()
   const commits = new Map<string, { tree: string; parent?: string; message: string; timestamp: number }>()
   const refs = new Map<string, string>()
+  let commitCounter = 0
 
   return {
     // Blob operations
     writeBlob: vi.fn(async (content: string) => {
-      const hash = `blob_${Buffer.from(content).toString('base64').slice(0, 8)}`
+      // Use full base64 hash to avoid collisions
+      const hash = `blob_${Buffer.from(content).toString('base64').replace(/[/+=]/g, '_')}`
       blobs.set(hash, content)
       return hash
     }),
     readBlob: vi.fn(async (hash: string) => {
       const content = blobs.get(hash)
-      if (!content) throw new Error(`Blob not found: ${hash}`)
+      if (content === undefined) throw new Error(`Blob not found: ${hash}`)
       return content
     }),
 
     // Tree operations
     writeTree: vi.fn(async (entries: Record<string, string>) => {
-      const hash = `tree_${Object.keys(entries).join('_').slice(0, 8)}`
+      // Use crypto-style hash based on full entries content
+      const content = JSON.stringify(entries)
+      const hash = `tree_${Buffer.from(content).toString('base64').replace(/[/+=]/g, '_')}`
       trees.set(hash, entries)
       return hash
     }),
@@ -48,7 +52,8 @@ function createMockGitxClient(): GitxClient {
 
     // Commit operations
     commit: vi.fn(async (treeHash: string, message: string, parent?: string) => {
-      const hash = `commit_${Date.now().toString(36)}`
+      // Use counter to ensure unique hashes
+      const hash = `commit_${Date.now().toString(36)}_${commitCounter++}`
       commits.set(hash, { tree: treeHash, parent, message, timestamp: Date.now() })
       return hash
     }),
@@ -637,6 +642,54 @@ describe('GitxStorage', () => {
 
       // Should not throw, one write should win
       await expect(writes).resolves.toBeDefined()
+    })
+  })
+
+  describe('StorageTraceHook', () => {
+    it('should accept a trace hook and call trace method during operations', async () => {
+      const traceCalls: Array<{ level: string; message: string; context?: Record<string, unknown> }> = []
+      const traceHook: StorageTraceHook = {
+        trace: (level, message, context) => {
+          traceCalls.push({ level, message, context })
+        },
+      }
+
+      const tracedStorage = new GitxStorage(mockClient, traceHook)
+
+      // Perform an operation that should trigger tracing
+      await tracedStorage.write('@test/traced', {
+        name: '@test/traced',
+        types: '',
+        module: 'export const x = 1',
+        tests: '',
+        script: '',
+      })
+
+      // Verify trace was called
+      expect(traceCalls.length).toBeGreaterThan(0)
+      expect(traceCalls.some(call => call.message.includes('write'))).toBe(true)
+    })
+
+    it('should properly initialize trace in constructor', async () => {
+      const traceHook: StorageTraceHook = {
+        trace: vi.fn(),
+      }
+
+      const tracedStorage = new GitxStorage(mockClient, traceHook)
+
+      // This should not throw "this.trace is not a function"
+      await tracedStorage.read('@nonexistent/module')
+
+      // The trace method should have been called
+      expect(traceHook.trace).toHaveBeenCalled()
+    })
+
+    it('should work without a trace hook (default no-op)', async () => {
+      // Create storage without trace hook - should use default no-op
+      const defaultStorage = new GitxStorage(mockClient)
+
+      // This should not throw any errors
+      await expect(defaultStorage.read('@nonexistent/module')).resolves.toBeNull()
     })
   })
 
