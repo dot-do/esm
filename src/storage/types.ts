@@ -20,6 +20,10 @@ export interface StoredModule {
   script: string
   /** Version hash (set when read from storage) */
   version?: string
+  /** Timestamp when the module was first created */
+  createdAt?: Date
+  /** Timestamp when the module was last updated */
+  updatedAt?: Date
 }
 
 /**
@@ -36,12 +40,12 @@ export interface WriteResult {
  * Version information from commit history
  */
 export interface ModuleVersion {
-  /** Commit hash */
-  hash: string
+  /** Version identifier (commit hash) */
+  version: string
   /** Commit message */
   message: string
-  /** Unix timestamp */
-  timestamp: number
+  /** Timestamp when version was created */
+  timestamp: Date
   /** Parent commit hash (if any) */
   parent?: string
 }

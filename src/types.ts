@@ -179,7 +179,10 @@ export interface TestCaseResult {
 export interface ESMTestResult {
   passed: number
   failed: number
+  total: number
   results: TestCaseResult[]
+  failures?: Array<{ name: string; error: string }>
+  duration: number
 }
 
 /**
@@ -303,6 +306,8 @@ export function isESMTestResult(value: unknown): value is ESMTestResult {
   return (
     typeof obj.passed === 'number' &&
     typeof obj.failed === 'number' &&
+    typeof obj.total === 'number' &&
+    typeof obj.duration === 'number' &&
     Array.isArray(obj.results)
   )
 }
@@ -395,13 +400,19 @@ export function createESMWriteOptions(options: {
 /**
  * Create ESMTestResult from test case results
  */
-export function createESMTestResult(results: TestCaseResult[]): ESMTestResult {
+export function createESMTestResult(results: TestCaseResult[], duration = 0): ESMTestResult {
   const passed = results.filter(r => r.passed).length
   const failed = results.filter(r => !r.passed).length
+  const failures = results
+    .filter(r => !r.passed && r.error)
+    .map(r => ({ name: r.name, error: r.error! }))
   return {
     passed,
     failed,
+    total: results.length,
     results,
+    failures: failures.length > 0 ? failures : undefined,
+    duration,
   }
 }
 
@@ -418,6 +429,112 @@ export function createESMRunResult(options: {
     logs: options.logs || [],
     errors: options.errors || [],
   }
+}
+
+// =============================================================================
+// ESM API Types (used by ESM class)
+// =============================================================================
+
+/**
+ * WriteOptions - Options for writing a module via ESM class
+ *
+ * Alias for ESMWriteOptions for API consistency.
+ */
+export type WriteOptions = ESMWriteOptions
+
+/**
+ * ReadResult - Result of reading a module via ESM class
+ *
+ * Simplified version of ESMReadResult with optional tests/script.
+ */
+export interface ReadResult {
+  name: string
+  types: string
+  module: string
+  tests?: string
+  script?: string
+  version: string
+}
+
+/**
+ * RunResult - Result of running a module's script
+ */
+export interface RunResult {
+  value: unknown
+  logs: string[] | string
+  errors: string[]
+  exitCode: number
+}
+
+/**
+ * RunOptions - Options for running a module (CLI-aligned signature)
+ */
+export interface RunOptions {
+  name: string
+  args?: Record<string, unknown>
+  timeout?: number
+  env?: Record<string, string>
+}
+
+/**
+ * TestOptions - Options for testing a module (CLI-aligned signature)
+ */
+export interface TestOptions {
+  name: string
+  watch?: boolean
+  coverage?: boolean
+  filter?: string
+}
+
+/**
+ * SingleTestResult - Result of a single test case
+ *
+ * Alias for TestCaseResult for API consistency.
+ */
+export type SingleTestResult = TestCaseResult
+
+/**
+ * TestResult - Result of testing a module
+ *
+ * Alias for ESMTestResult for API consistency.
+ */
+export type TestResult = ESMTestResult
+
+/**
+ * DeleteResult - Result of deleting a module
+ */
+export interface DeleteResult {
+  deleted: boolean
+  name: string
+}
+
+/**
+ * WriteResult - Result of writing a module
+ */
+export interface WriteResult {
+  name: string
+  version: string
+  testResults?: TestResult
+  value?: unknown
+}
+
+/**
+ * FileChange - Change information for a single file in a diff
+ */
+export interface FileChange {
+  file: string
+  additions: number
+  deletions: number
+}
+
+/**
+ * DiffResult - Result of comparing two versions of a module
+ */
+export interface DiffResult {
+  from: string
+  to: string
+  changes: FileChange[]
+  patch: string
 }
 
 // =============================================================================

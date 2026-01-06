@@ -555,6 +555,183 @@ describe('MCP Tools', () => {
         expect(mockEsm.diff).toHaveBeenCalledWith('@math/add', 'abc123', 'HEAD')
       })
     })
+
+    describe('esm_diff integration', () => {
+      // Create a mock ESM that stores modules with version history
+      let mockESM: ESM
+      let storedModules: Map<string, Array<{ version: string; types: string; module: string }>>
+
+      beforeEach(() => {
+        storedModules = new Map()
+        mockESM = {
+          write: vi.fn().mockImplementation(async (options: { name: string; types?: string; module?: string }) => {
+            const version = `v${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+            const moduleHistory = storedModules.get(options.name) || []
+            moduleHistory.push({
+              version,
+              types: options.types || '',
+              module: options.module || '',
+            })
+            storedModules.set(options.name, moduleHistory)
+            return { version, name: options.name }
+          }),
+          diff: vi.fn().mockImplementation(async (name: string, from: string, to: string) => {
+            const history = storedModules.get(name)
+            if (!history) {
+              throw new Error(`Module ${name} not found`)
+            }
+            const fromVersion = history.find(h => h.version === from)
+            const toVersion = to === 'HEAD' ? history[history.length - 1] : history.find(h => h.version === to)
+            if (!fromVersion) {
+              throw new Error(`Version ${from} not found for module ${name}`)
+            }
+            if (!toVersion) {
+              throw new Error(`Version ${to} not found for module ${name}`)
+            }
+            // Note: This mock doesn't generate real diffs - implementation needed
+            return {
+              from,
+              to: to === 'HEAD' ? toVersion.version : to,
+              changes: [],
+              patch: '',
+            }
+          }),
+        } as unknown as ESM
+      })
+
+      it('should compare two versions of a module', async () => {
+        // Create initial version
+        const writeResult1 = await mockESM.write({
+          name: '@test/diff-mod',
+          types: 'export declare function v1(): number;',
+          module: 'export function v1() { return 1; }',
+        })
+        const v1 = writeResult1.version
+
+        // Update to create new version
+        const writeResult2 = await mockESM.write({
+          name: '@test/diff-mod',
+          types: 'export declare function v2(): number;',
+          module: 'export function v2() { return 2; }',
+        })
+        const v2 = writeResult2.version
+
+        const result = await handleToolCall('esm_diff', {
+          name: '@test/diff-mod',
+          from: v1,
+          to: v2,
+        }, mockESM)
+
+        expect(result.isError).toBeFalsy()
+        expect(result.content[0].text).toContain('Diff')
+        expect(result.content[0].text).toContain('from')
+        expect(result.content[0].text).toContain('to')
+      })
+
+      it('should show additions and deletions', async () => {
+        // Create a mock that returns changes with additions/deletions
+        const mockWithChanges = {
+          ...mockESM,
+          diff: vi.fn().mockImplementation(async () => {
+            // Note: The real implementation should return proper diff stats
+            // This mock returns empty changes - implementation needs to compute real diffs
+            return {
+              from: 'v1',
+              to: 'v2',
+              changes: [], // Real implementation should return file changes with stats
+              patch: '',
+            }
+          }),
+        } as unknown as ESM
+
+        const result = await handleToolCall('esm_diff', {
+          name: '@test/diff-changes',
+          from: 'v1',
+          to: 'v2',
+        }, mockWithChanges)
+
+        expect(result.isError).toBeFalsy()
+        // Should show file changes with additions/deletions - will FAIL because mock returns empty changes
+        expect(result.content[0].text).toMatch(/\+\d+|\-\d+|additions|deletions/i)
+      })
+
+      it('should default to HEAD when to is not specified', async () => {
+        // Create a mock that returns HEAD literal in output
+        const mockWithHEAD = {
+          ...mockESM,
+          diff: vi.fn().mockImplementation(async (name: string, from: string, to: string) => {
+            // Return a response that includes the literal 'to' value for verification
+            return {
+              from,
+              to,
+              changes: [],
+              patch: '',
+            }
+          }),
+        } as unknown as ESM
+
+        const result = await handleToolCall('esm_diff', {
+          name: '@test/diff-head',
+          from: 'v1',
+        }, mockWithHEAD)
+
+        expect(result.isError).toBeFalsy()
+        // The output should indicate that HEAD was used (showing "to HEAD" or similar)
+        expect(result.content[0].text).toContain('HEAD')
+      })
+
+      it('should include patch content', async () => {
+        // Create two versions
+        const writeResult1 = await mockESM.write({
+          name: '@test/diff-patch',
+          types: 'export declare const a: number;',
+          module: 'export const a = 1;',
+        })
+        const v1 = writeResult1.version
+
+        const writeResult2 = await mockESM.write({
+          name: '@test/diff-patch',
+          types: 'export declare const b: number;',
+          module: 'export const b = 2;',
+        })
+        const v2 = writeResult2.version
+
+        const result = await handleToolCall('esm_diff', {
+          name: '@test/diff-patch',
+          from: v1,
+          to: v2,
+        }, mockESM)
+
+        expect(result.isError).toBeFalsy()
+        expect(result.content[0].text).toContain('Patch')
+      })
+
+      it('should error for non-existent module', async () => {
+        const result = await handleToolCall('esm_diff', {
+          name: '@nonexistent/module',
+          from: 'v1',
+        }, mockESM)
+
+        expect(result.isError).toBe(true)
+        expect(result.content[0].text).toContain('not found')
+      })
+
+      it('should error for non-existent version', async () => {
+        await mockESM.write({
+          name: '@test/diff-ver',
+          types: 'export {};',
+          module: 'export {};',
+        })
+
+        const result = await handleToolCall('esm_diff', {
+          name: '@test/diff-ver',
+          from: 'nonexistent-version',
+        }, mockESM)
+
+        expect(result.isError).toBe(true)
+        expect(result.content[0].text).toMatch(/version.*not found/i)
+      })
+    })
   })
 
   describe('esm_delete tool', () => {

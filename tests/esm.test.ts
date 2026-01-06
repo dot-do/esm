@@ -152,14 +152,14 @@ describe('ESM', () => {
         })
       ).rejects.toThrow()
 
-      // Missing types
-      await expect(
-        esm.write({
-          name: '@test/no-types',
-          types: '',
-          module: `export function x() {}`,
-        })
-      ).rejects.toThrow()
+      // Empty types are now allowed with a warning (per edge-case handling)
+      // See tests/edge-cases/empty-input.test.ts for empty input behavior
+      const result = await esm.write({
+        name: '@test/no-types',
+        types: '',
+        module: `export function x() {}`,
+      })
+      expect(result.name).toBe('@test/no-types')
 
       // Missing module
       await expect(
@@ -447,7 +447,7 @@ describe('ESM', () => {
       expect(result.results).toBeDefined()
       expect(result.results.length).toBe(3)
       expect(result.results[0].name).toContain('returns strings')
-      expect(result.results[0].status).toBe('passed')
+      expect(result.results[0].passed).toBe(true)
       expect(result.duration).toBeDefined()
       expect(typeof result.duration).toBe('number')
     })

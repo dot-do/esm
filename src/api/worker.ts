@@ -19,20 +19,691 @@
  * - esm-bhs: Worker implementation
  */
 
-import type { StoredModule, ModuleVersion } from '../storage/types.js'
+import type { StoredModule, ModuleVersion, GitxClient, WriteResult, ModuleStorage } from '../storage/types.js'
 
-// In-memory storage for testing (will be replaced with GitxStorage)
-const moduleStore = new Map<string, StoredModule>()
-const moduleVersions = new Map<string, ModuleVersion[]>()
+// =============================================================================
+// In-Memory GitxClient Implementation for Cloudflare Workers
+// =============================================================================
+// This implements the GitxClient interface using in-memory storage for the
+// Cloudflare Workers runtime. It provides git-like content-addressed storage
+// with blobs, trees, commits, refs, and tags - all stored in Maps.
+//
+// Note: This is a stateless implementation - data persists only for the
+// lifetime of the worker instance. For durable storage, connect to the
+// actual gitx.do backend service.
+// =============================================================================
 
-// Pre-populate with test modules
-function initTestModules() {
-  // @math/add module
-  moduleStore.set('@math/add', {
-    name: '@math/add',
-    types: 'export declare function add(a: number, b: number): number;',
-    module: 'export function add(a, b) { return a + b; }',
-    tests: `
+function generateSha(content: string): string {
+  // Generate a short SHA-like hash for content addressing
+  let hash = 0
+  for (let i = 0; i < content.length; i++) {
+    const char = content.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash = hash & hash
+  }
+  // Return 7-char hex string like git short SHA
+  const hex = Math.abs(hash).toString(16).padStart(7, '0').slice(0, 7)
+  return hex + Math.random().toString(16).slice(2, 9) // Add randomness for uniqueness
+}
+
+class InMemoryGitxClient implements GitxClient {
+  private blobs = new Map<string, string>()
+  private trees = new Map<string, Record<string, string>>()
+  private commits = new Map<string, { tree: string; parent?: string; message: string; timestamp: number }>()
+  private refs = new Map<string, string>()
+  // Tag storage: module name -> tag name -> commit SHA
+  private tags = new Map<string, Map<string, string>>()
+
+  async writeBlob(content: string): Promise<string> {
+    const hash = generateSha(content + Date.now())
+    this.blobs.set(hash, content)
+    return hash
+  }
+
+  async readBlob(hash: string): Promise<string> {
+    if (!this.blobs.has(hash)) {
+      throw new Error(`Blob ${hash} not found`)
+    }
+    return this.blobs.get(hash)!
+  }
+
+  async writeTree(entries: Record<string, string>): Promise<string> {
+    const hash = generateSha(JSON.stringify(entries) + Date.now())
+    this.trees.set(hash, entries)
+    return hash
+  }
+
+  async readTree(hash: string): Promise<Record<string, string>> {
+    const tree = this.trees.get(hash)
+    if (!tree) throw new Error(`Tree ${hash} not found`)
+    return tree
+  }
+
+  async commit(treeHash: string, message: string, parent?: string): Promise<string> {
+    const timestamp = Date.now()
+    const hash = generateSha(treeHash + message + timestamp)
+    this.commits.set(hash, { tree: treeHash, parent, message, timestamp })
+    return hash
+  }
+
+  async getCommit(hash: string): Promise<{ tree: string; parent?: string; message: string; timestamp: number }> {
+    const commit = this.commits.get(hash)
+    if (!commit) throw new Error(`Commit ${hash} not found`)
+    return commit
+  }
+
+  async updateRef(ref: string, commitHash: string): Promise<void> {
+    this.refs.set(ref, commitHash)
+  }
+
+  async getRef(ref: string): Promise<string | null> {
+    return this.refs.get(ref) || null
+  }
+
+  async listRefs(prefix?: string): Promise<Record<string, string>> {
+    const result: Record<string, string> = {}
+    for (const [ref, hash] of this.refs) {
+      if (!prefix || ref.startsWith(prefix)) {
+        result[ref] = hash
+      }
+    }
+    return result
+  }
+
+  async deleteRef(ref: string): Promise<void> {
+    this.refs.delete(ref)
+  }
+
+  async log(startCommit: string, limit?: number): Promise<Array<{
+    hash: string
+    tree: string
+    parent?: string
+    message: string
+    timestamp: number
+  }>> {
+    const history: Array<{
+      hash: string
+      tree: string
+      parent?: string
+      message: string
+      timestamp: number
+    }> = []
+
+    let currentHash: string | undefined = startCommit
+    const maxItems = limit || 100
+
+    while (currentHash && history.length < maxItems) {
+      const commit = this.commits.get(currentHash)
+      if (!commit) break
+      history.push({
+        hash: currentHash,
+        tree: commit.tree,
+        parent: commit.parent,
+        message: commit.message,
+        timestamp: commit.timestamp,
+      })
+      currentHash = commit.parent
+    }
+
+    return history
+  }
+
+  // Tag operations
+  createTag(moduleName: string, tagName: string, commitSha: string): void {
+    if (!this.tags.has(moduleName)) {
+      this.tags.set(moduleName, new Map())
+    }
+    this.tags.get(moduleName)!.set(tagName, commitSha)
+  }
+
+  getTaggedCommit(moduleName: string, tagName: string): string | null {
+    return this.tags.get(moduleName)?.get(tagName) || null
+  }
+}
+
+// =============================================================================
+// GitxStorage Implementation for Worker
+// =============================================================================
+
+function moduleToRef(name: string): string {
+  return `refs/modules/${name}`
+}
+
+function refToModule(ref: string): string {
+  return ref.replace('refs/modules/', '')
+}
+
+class WorkerGitxStorage implements ModuleStorage {
+  private client: InMemoryGitxClient
+
+  constructor(client: InMemoryGitxClient) {
+    this.client = client
+  }
+
+  async read(name: string, version?: string): Promise<StoredModule | null> {
+    let commitHash: string
+    let displayVersion: string | undefined
+
+    if (version) {
+      // Check if version is a tag (starts with 'v')
+      if (version.startsWith('v')) {
+        const taggedCommit = this.client.getTaggedCommit(name, version)
+        if (taggedCommit) {
+          commitHash = taggedCommit
+          displayVersion = version // Use tag name as display version
+        } else {
+          // Try as a SHA
+          commitHash = version
+        }
+      } else {
+        commitHash = version
+      }
+    } else {
+      const ref = moduleToRef(name)
+      const latestHash = await this.client.getRef(ref)
+      if (!latestHash) return null
+      commitHash = latestHash
+    }
+
+    try {
+      const commit = await this.client.getCommit(commitHash)
+      const tree = await this.client.readTree(commit.tree)
+
+      const [types, module, tests, script] = await Promise.all([
+        this.client.readBlob(tree['index.d.ts']),
+        this.client.readBlob(tree['index.mjs']),
+        this.client.readBlob(tree['index.test.js']),
+        this.client.readBlob(tree['index.script.js']),
+      ])
+
+      return {
+        name,
+        types,
+        module,
+        tests,
+        script,
+        version: displayVersion || commitHash, // Use tag name if available
+      }
+    } catch {
+      return null
+    }
+  }
+
+  async write(name: string, data: StoredModule): Promise<WriteResult> {
+    const [typesHash, moduleHash, testsHash, scriptHash] = await Promise.all([
+      this.client.writeBlob(data.types),
+      this.client.writeBlob(data.module),
+      this.client.writeBlob(data.tests),
+      this.client.writeBlob(data.script),
+    ])
+
+    const treeHash = await this.client.writeTree({
+      'index.d.ts': typesHash,
+      'index.mjs': moduleHash,
+      'index.test.js': testsHash,
+      'index.script.js': scriptHash,
+    })
+
+    const ref = moduleToRef(name)
+    const parentHash = await this.client.getRef(ref)
+    const message = parentHash ? `Update ${name}` : `Create ${name}`
+    const commitHash = await this.client.commit(treeHash, message, parentHash ?? undefined)
+    await this.client.updateRef(ref, commitHash)
+
+    return { version: commitHash, name }
+  }
+
+  async delete(name: string): Promise<void> {
+    const ref = moduleToRef(name)
+    await this.client.deleteRef(ref)
+  }
+
+  async list(pattern?: string): Promise<string[]> {
+    const refs = await this.client.listRefs('refs/modules/')
+    const names = Object.keys(refs).map(refToModule)
+    if (pattern) {
+      return names.filter(n => n.includes(pattern.replace(/\*/g, '')))
+    }
+    return names.sort()
+  }
+
+  async versions(name: string, limit?: number): Promise<ModuleVersion[]> {
+    const ref = moduleToRef(name)
+    const headHash = await this.client.getRef(ref)
+    if (!headHash) return []
+
+    const history = await this.client.log(headHash, limit)
+    return history.map(commit => ({
+      version: commit.hash,
+      message: commit.message,
+      timestamp: new Date(commit.timestamp),
+      parent: commit.parent,
+    }))
+  }
+
+  // Extended method to get commit info
+  async getCommit(hash: string): Promise<{ tree: string; parent?: string; message: string; timestamp: number } | null> {
+    try {
+      return await this.client.getCommit(hash)
+    } catch {
+      return null
+    }
+  }
+
+  // Create a tag for a module version
+  createTag(name: string, tag: string, commitSha: string): void {
+    this.client.createTag(name, tag, commitSha)
+  }
+}
+
+// Singleton storage instance
+const gitxClient = new InMemoryGitxClient()
+const gitxStorage = new WorkerGitxStorage(gitxClient)
+
+// =============================================================================
+// Extended WriteResult with commit info for API responses
+// =============================================================================
+interface ExtendedWriteResult extends WriteResult {
+  files: string[]
+  commit: {
+    sha: string
+    message: string
+    author: string
+    timestamp: string
+  }
+  created?: boolean
+  updated?: boolean
+}
+
+// Worker-compatible sandbox executor using unsafe_eval binding
+// This is used when running in Cloudflare Workers/miniflare environment
+// where ai-evaluate (which uses miniflare internally) cannot be used
+//
+// The unsafe_eval binding provides newFunction() which is required for
+// dynamic code execution in the workerd environment where eval() and
+// new Function() are blocked by default.
+
+// Env interface for worker bindings
+interface Env {
+  unsafe_eval: {
+    eval(code: string): unknown
+    newFunction(...args: string[]): (...args: unknown[]) => unknown
+  }
+}
+
+// Module-level reference to unsafe_eval binding (set in fetch handler)
+let unsafeEval: Env['unsafe_eval'] | null = null
+
+interface LogEntry {
+  level: 'log' | 'warn' | 'error' | 'info' | 'debug'
+  args: unknown[]
+}
+
+interface WorkerTestResult {
+  passed: number
+  failed: number
+  total: number
+  duration: number
+  tests: Array<{
+    name: string
+    status: 'passed' | 'failed'
+    duration?: number
+    error?: string
+  }>
+}
+
+interface WorkerRunResult {
+  success: boolean
+  value?: unknown
+  error?: string
+  logs: LogEntry[]
+  duration: number
+}
+
+// Convert ESM module to executable code (strip export keywords)
+function convertToExecutable(module: string): string {
+  let code = module
+  code = code.replace(/export\s+(async\s+)?function\s+(\w+)/g, '$1function $2')
+  code = code.replace(/export\s+const\s+/g, 'const ')
+  code = code.replace(/export\s+let\s+/g, 'let ')
+  code = code.replace(/export\s+class\s+/g, 'class ')
+  // Remove import statements for now (they would need to be resolved)
+  code = code.replace(/import\s+.*?from\s+['"][^'"]+['"]\s*;?/g, '')
+  return code
+}
+
+// Extract export names from module
+function extractExportNames(module: string): string[] {
+  const names: string[] = []
+  const funcRegex = /export\s+(?:async\s+)?function\s+(\w+)/g
+  const constRegex = /export\s+const\s+(\w+)/g
+  const letRegex = /export\s+let\s+(\w+)/g
+  const classRegex = /export\s+class\s+(\w+)/g
+
+  let match
+  while ((match = funcRegex.exec(module)) !== null) names.push(match[1])
+  while ((match = constRegex.exec(module)) !== null) names.push(match[1])
+  while ((match = letRegex.exec(module)) !== null) names.push(match[1])
+  while ((match = classRegex.exec(module)) !== null) names.push(match[1])
+
+  return names
+}
+
+// Simple test framework for worker environment
+function createTestRunner() {
+  const results: Array<{ name: string; status: 'passed' | 'failed'; duration?: number; error?: string }> = []
+  const describeStack: string[] = []
+
+  function describe(name: string, fn: () => void) {
+    describeStack.push(name)
+    try {
+      fn()
+    } finally {
+      describeStack.pop()
+    }
+  }
+
+  function it(name: string, fn: () => void) {
+    const fullName = [...describeStack, name].join(' > ')
+    const start = Date.now()
+    try {
+      fn()
+      results.push({ name: fullName, status: 'passed', duration: Date.now() - start })
+    } catch (e) {
+      results.push({
+        name: fullName,
+        status: 'failed',
+        duration: Date.now() - start,
+        error: e instanceof Error ? e.message : String(e)
+      })
+    }
+  }
+
+  function expect(actual: unknown) {
+    return {
+      toBe(expected: unknown) {
+        if (actual !== expected) {
+          throw new Error(`Expected ${JSON.stringify(expected)} but got ${JSON.stringify(actual)}`)
+        }
+      },
+      toEqual(expected: unknown) {
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+          throw new Error(`Expected ${JSON.stringify(expected)} but got ${JSON.stringify(actual)}`)
+        }
+      },
+      toBeCloseTo(expected: number, precision = 2) {
+        const actualNum = actual as number
+        const diff = Math.abs(actualNum - expected)
+        const epsilon = Math.pow(10, -precision)
+        if (diff > epsilon) {
+          throw new Error(`Expected ${expected} (within ${precision} decimal places) but got ${actualNum}`)
+        }
+      },
+      toThrow(message?: string | RegExp) {
+        const fn = actual as () => void
+        let threw = false
+        let thrownError: unknown
+        try {
+          fn()
+        } catch (e) {
+          threw = true
+          thrownError = e
+        }
+        if (!threw) {
+          throw new Error('Expected function to throw but it did not')
+        }
+        if (message) {
+          const errorMsg = thrownError instanceof Error ? thrownError.message : String(thrownError)
+          if (typeof message === 'string' && !errorMsg.includes(message)) {
+            throw new Error(`Expected error message to include "${message}" but got "${errorMsg}"`)
+          }
+          if (message instanceof RegExp && !message.test(errorMsg)) {
+            throw new Error(`Expected error message to match ${message} but got "${errorMsg}"`)
+          }
+        }
+      },
+      toBeDefined() {
+        if (actual === undefined) {
+          throw new Error('Expected value to be defined but got undefined')
+        }
+      },
+      toBeUndefined() {
+        if (actual !== undefined) {
+          throw new Error(`Expected undefined but got ${JSON.stringify(actual)}`)
+        }
+      },
+      toContain(expected: unknown) {
+        if (Array.isArray(actual)) {
+          if (!actual.includes(expected)) {
+            throw new Error(`Expected array to contain ${JSON.stringify(expected)}`)
+          }
+        } else if (typeof actual === 'string') {
+          if (!actual.includes(expected as string)) {
+            throw new Error(`Expected string to contain "${expected}"`)
+          }
+        }
+      },
+      toMatch(pattern: RegExp) {
+        if (typeof actual !== 'string' || !pattern.test(actual)) {
+          throw new Error(`Expected "${actual}" to match ${pattern}`)
+        }
+      }
+    }
+  }
+
+  return { describe, it, expect, results }
+}
+
+// Helper to create a new function using unsafe_eval or fallback
+// The unsafe_eval binding's newFunction only takes a body (no params),
+// so we use eval() to create a function expression instead
+function createFunction(...args: string[]): (...fnArgs: unknown[]) => unknown {
+  // args = [...paramNames, body] - standard Function constructor signature
+  const body = args.pop() || ''
+  const params = args
+
+  if (unsafeEval && typeof unsafeEval.eval === 'function') {
+    // Use eval to create a function with parameters
+    const paramList = params.join(', ')
+    const fnCode = `(function(${paramList}) { ${body} })`
+    return unsafeEval.eval(fnCode) as (...fnArgs: unknown[]) => unknown
+  }
+
+  // Fallback for environments without unsafe_eval binding
+  // This works in Node.js test environment but not in workerd
+  try {
+    return new Function(...params, body) as (...fnArgs: unknown[]) => unknown
+  } catch (e) {
+    throw new Error(`Code generation from strings is not allowed. The unsafe_eval binding may not be configured. Original error: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+// Worker-compatible test executor
+async function workerRunTests(moduleCode: string, testCode: string, timeout: number = 5000): Promise<WorkerTestResult> {
+  const startTime = Date.now()
+
+  try {
+    const executableModule = convertToExecutable(moduleCode)
+    const exportNames = extractExportNames(moduleCode)
+    const { describe, it, expect, results } = createTestRunner()
+
+    // Build the execution context
+    const context: Record<string, unknown> = {
+      describe,
+      it,
+      expect,
+      console: {
+        log: () => {},
+        warn: () => {},
+        error: () => {},
+        info: () => {},
+        debug: () => {}
+      }
+    }
+
+    // Execute module to get exports using unsafe_eval binding
+    const moduleWrapper = createFunction(...Object.keys(context), `
+      ${executableModule}
+      return { ${exportNames.join(', ')} };
+    `)
+
+    const exports = moduleWrapper(...Object.values(context))
+
+    // Add exports to context
+    for (const name of exportNames) {
+      context[name] = (exports as Record<string, unknown>)[name]
+    }
+
+    // Execute tests with timeout using unsafe_eval binding
+    const testWrapper = createFunction(...Object.keys(context), testCode)
+
+    // Use Promise.race for timeout
+    const runTests = async () => {
+      testWrapper(...Object.values(context))
+      return results
+    }
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Test timeout exceeded')), timeout)
+    })
+
+    const testResults = await Promise.race([runTests(), timeoutPromise])
+
+    const passed = testResults.filter(r => r.status === 'passed').length
+    const failed = testResults.filter(r => r.status === 'failed').length
+
+    return {
+      passed,
+      failed,
+      total: passed + failed,
+      duration: Date.now() - startTime,
+      tests: testResults
+    }
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e)
+    const isTimeout = error.toLowerCase().includes('timeout')
+
+    return {
+      passed: 0,
+      failed: 1,
+      total: 1,
+      duration: Date.now() - startTime,
+      tests: [{
+        name: isTimeout ? 'Test execution' : 'Module/Test parsing',
+        status: 'failed',
+        error
+      }]
+    }
+  }
+}
+
+// Worker-compatible script executor
+async function workerRunScript(
+  moduleCode: string,
+  scriptCode: string,
+  args?: Record<string, unknown>,
+  timeout: number = 5000
+): Promise<WorkerRunResult> {
+  const startTime = Date.now()
+  const logs: LogEntry[] = []
+
+  try {
+    const executableModule = convertToExecutable(moduleCode)
+    const exportNames = extractExportNames(moduleCode)
+
+    // Create console proxy to capture logs
+    const consoleProxy = {
+      log: (...logArgs: unknown[]) => logs.push({ level: 'log', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) }),
+      warn: (...logArgs: unknown[]) => logs.push({ level: 'warn', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) }),
+      error: (...logArgs: unknown[]) => logs.push({ level: 'error', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) }),
+      info: (...logArgs: unknown[]) => logs.push({ level: 'info', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) }),
+      debug: (...logArgs: unknown[]) => logs.push({ level: 'debug', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) })
+    }
+
+    // Build the execution context - block dangerous globals
+    const context: Record<string, unknown> = {
+      console: consoleProxy,
+      args: args || {},
+      // Block dangerous globals
+      process: undefined,
+      require: undefined,
+      __dirname: undefined,
+      __filename: undefined,
+      global: undefined,
+      Buffer: undefined,
+      fetch: undefined
+    }
+
+    // Execute module to get exports using unsafe_eval binding
+    const moduleWrapper = createFunction(...Object.keys(context), `
+      "use strict";
+      ${executableModule}
+      return { ${exportNames.join(', ')} };
+    `)
+
+    const exports = moduleWrapper(...Object.values(context))
+
+    // Add exports to context
+    for (const name of exportNames) {
+      context[name] = (exports as Record<string, unknown>)[name]
+    }
+
+    // Wrap script to handle return statements and async
+    let wrappedScript = scriptCode
+    if (scriptCode.includes('await ')) {
+      wrappedScript = `return (async () => { ${scriptCode} })()`
+    }
+
+    // Execute script with timeout using unsafe_eval binding
+    const scriptWrapper = createFunction(...Object.keys(context), `
+      "use strict";
+      ${wrappedScript}
+    `)
+
+    const runScript = async () => {
+      const result = scriptWrapper(...Object.values(context))
+      // If result is a promise, await it
+      return result instanceof Promise ? await result : result
+    }
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Script timeout exceeded')), timeout)
+    })
+
+    const value = await Promise.race([runScript(), timeoutPromise])
+
+    return {
+      success: true,
+      value,
+      logs,
+      duration: Date.now() - startTime
+    }
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e)
+
+    return {
+      success: false,
+      error,
+      logs,
+      duration: Date.now() - startTime
+    }
+  }
+}
+
+// Pre-populate test modules in GitxStorage
+let testModulesInitialized = false
+
+async function initTestModules() {
+  if (testModulesInitialized) return
+  testModulesInitialized = true
+
+  const testModules: StoredModule[] = [
+    // @math/add module
+    {
+      name: '@math/add',
+      types: 'export declare function add(a: number, b: number): number;',
+      module: 'export function add(a, b) { return a + b; }',
+      tests: `
 describe('add', () => {
   it('adds two numbers', () => {
     expect(add(2, 3)).toBe(5);
@@ -42,42 +713,32 @@ describe('add', () => {
   });
 });
 `,
-    script: 'return add(1, 2);',
-    version: 'v1.0.0',
-  })
-  moduleVersions.set('@math/add', [
-    { hash: 'v1.0.0', message: 'Initial release', timestamp: Date.now(), parent: undefined },
-  ])
-
-  // @math/stats module with dependency
-  moduleStore.set('@math/stats', {
-    name: '@math/stats',
-    types: 'export declare function mean(nums: number[]): number;',
-    module: `import { add } from 'esm.do/@math/add';
+      script: 'return add(1, 2);',
+    },
+    // @math/stats module with dependency
+    {
+      name: '@math/stats',
+      types: 'export declare function mean(nums: number[]): number;',
+      module: `import { add } from 'esm.do/@math/add';
 export function mean(nums) {
   if (nums.length === 0) return 0;
   const sum = nums.reduce((a, b) => add(a, b), 0);
   return sum / nums.length;
 }`,
-    tests: `
+      tests: `
 describe('mean', () => {
   it('calculates mean of numbers', () => {
     expect(mean([1, 2, 3])).toBe(2);
   });
 });
 `,
-    script: 'return mean([1, 2, 3, 4, 5]);',
-    version: 'v1.0.0',
-  })
-  moduleVersions.set('@math/stats', [
-    { hash: 'v1.0.0', message: 'Initial release', timestamp: Date.now(), parent: undefined },
-  ])
-
-  // @math/calculator module - uses safe AST-based math parser
-  moduleStore.set('@math/calculator', {
-    name: '@math/calculator',
-    types: 'export declare function calculate(expr: string): number;',
-    module: `// Safe math expression parser using AST
+      script: 'return mean([1, 2, 3, 4, 5]);',
+    },
+    // @math/calculator module - uses safe AST-based math parser
+    {
+      name: '@math/calculator',
+      types: 'export declare function calculate(expr: string): number;',
+      module: `// Safe math expression parser using AST
 function tokenize(expr) {
   const tokens = [];
   let i = 0;
@@ -155,7 +816,7 @@ export function calculate(expr) {
   const ast = parse(tokens);
   return evaluate(ast);
 }`,
-    tests: `
+      tests: `
 describe('calculate', () => {
   it('evaluates expressions', () => {
     expect(calculate('2 + 2')).toBe(4);
@@ -172,92 +833,66 @@ describe('calculate', () => {
   });
 });
 `,
-    script: 'console.log("Starting calculation"); return calculate("1 + 1");',
-    version: 'v1.0.0',
-  })
-  moduleVersions.set('@math/calculator', [
-    { hash: 'v1.0.0', message: 'Initial release', timestamp: Date.now(), parent: undefined },
-  ])
-
-  // @test/failing module for testing failures
-  moduleStore.set('@test/failing', {
-    name: '@test/failing',
-    types: 'export declare function fail(): void;',
-    module: 'export function fail() { throw new Error("Intentional failure"); }',
-    tests: `
+      script: 'console.log("Starting calculation"); return calculate("1 + 1");',
+    },
+    // @test/failing module for testing failures
+    {
+      name: '@test/failing',
+      types: 'export declare function fail(): void;',
+      module: 'export function fail() { throw new Error("Intentional failure"); }',
+      tests: `
 describe('fail', () => {
   it('should fail', () => {
     expect(fail()).toBe('never');
   });
 });
 `,
-    script: 'return fail();',
-    version: 'v1.0.0',
-  })
-  moduleVersions.set('@test/failing', [
-    { hash: 'v1.0.0', message: 'Initial release', timestamp: Date.now(), parent: undefined },
-  ])
-
-  // @test/throwing module for script errors
-  moduleStore.set('@test/throwing', {
-    name: '@test/throwing',
-    types: 'export declare function throwError(): never;',
-    module: 'export function throwError() { throw new Error("Script error"); }',
-    tests: `describe('throwError', () => { it('throws', () => {}); });`,
-    script: 'throwError();',
-    version: 'v1.0.0',
-  })
-  moduleVersions.set('@test/throwing', [
-    { hash: 'v1.0.0', message: 'Initial release', timestamp: Date.now(), parent: undefined },
-  ])
-
-  // @test/infinite module for timeout testing
-  moduleStore.set('@test/infinite', {
-    name: '@test/infinite',
-    types: 'export declare function loop(): never;',
-    module: 'export function loop() { while(true) {} }',
-    tests: `describe('loop', () => { it('loops', () => {}); });`,
-    script: 'loop();',
-    version: 'v1.0.0',
-  })
-  moduleVersions.set('@test/infinite', [
-    { hash: 'v1.0.0', message: 'Initial release', timestamp: Date.now(), parent: undefined },
-  ])
-
-  // @test/sandbox module for sandbox testing
-  moduleStore.set('@test/sandbox', {
-    name: '@test/sandbox',
-    types: 'export declare function checkSandbox(): { sandboxed: boolean };',
-    module: `export function checkSandbox() {
+      script: 'return fail();',
+    },
+    // @test/throwing module for script errors
+    {
+      name: '@test/throwing',
+      types: 'export declare function throwError(): never;',
+      module: 'export function throwError() { throw new Error("Script error"); }',
+      tests: `describe('throwError', () => { it('throws', () => {}); });`,
+      script: 'throwError();',
+    },
+    // @test/infinite module for timeout testing
+    {
+      name: '@test/infinite',
+      types: 'export declare function loop(): never;',
+      module: 'export function loop() { while(true) {} }',
+      tests: `describe('loop', () => { it('loops', () => {}); });`,
+      script: 'loop();',
+    },
+    // @test/sandbox module for sandbox testing
+    {
+      name: '@test/sandbox',
+      types: 'export declare function checkSandbox(): { sandboxed: boolean };',
+      module: `export function checkSandbox() {
   const hasProcess = typeof process !== 'undefined';
   const hasFs = typeof require !== 'undefined';
   return { sandboxed: !hasProcess && !hasFs };
 }`,
-    tests: `describe('checkSandbox', () => { it('is sandboxed', () => {}); });`,
-    script: 'return checkSandbox();',
-    version: 'v1.0.0',
-  })
-  moduleVersions.set('@test/sandbox', [
-    { hash: 'v1.0.0', message: 'Initial release', timestamp: Date.now(), parent: undefined },
-  ])
-
-  // @utils/lodash module for external dependencies test
-  moduleStore.set('@utils/lodash', {
-    name: '@utils/lodash',
-    types: 'export declare function chunk<T>(arr: T[], size: number): T[][];',
-    module: `import _ from 'lodash';
+      tests: `describe('checkSandbox', () => { it('is sandboxed', () => {}); });`,
+      script: 'return checkSandbox();',
+    },
+    // @utils/lodash module for external dependencies test
+    {
+      name: '@utils/lodash',
+      types: 'export declare function chunk<T>(arr: T[], size: number): T[][];',
+      module: `import _ from 'lodash';
 export function chunk(arr, size) { return _.chunk(arr, size); }`,
-    tests: `describe('chunk', () => { it('chunks', () => {}); });`,
-    script: 'return chunk([1, 2, 3, 4], 2);',
-    version: 'v1.0.0',
-  })
-  moduleVersions.set('@utils/lodash', [
-    { hash: 'v1.0.0', message: 'Initial release', timestamp: Date.now(), parent: undefined },
-  ])
-}
+      tests: `describe('chunk', () => { it('chunks', () => {}); });`,
+      script: 'return chunk([1, 2, 3, 4], 2);',
+    },
+  ]
 
-// Initialize test modules
-initTestModules()
+  // Initialize test modules in GitxStorage
+  for (const mod of testModules) {
+    await gitxStorage.write(mod.name, mod)
+  }
+}
 
 // Rate limiting state
 const requestCounts = new Map<string, { count: number; resetAt: number }>()
@@ -464,8 +1099,8 @@ function parseModulePath(path: string): {
 
   if (!path) return null
 
-  // Check for actions first (e.g., /math/add/test or /math/add/run)
-  const actionMatch = path.match(/^(@?[^/]+)\/([^/]+)\/(test|run)$/)
+  // Check for actions first (e.g., /math/add/test or /math/add/run or /math/add/diff or /math/add/revert)
+  const actionMatch = path.match(/^(@?[^/]+)\/([^/]+)\/(test|run|diff|revert)$/)
   if (actionMatch) {
     const [, scope, name, action] = actionMatch
     return { scope: scope.replace(/^@/, ''), name, action }
@@ -557,7 +1192,7 @@ function resolveImports(code: string): string {
   )
 }
 
-// Helper: Run tests (simplified mock)
+// Helper: Run tests using worker-compatible sandbox
 interface TestResult {
   name: string
   status: 'passed' | 'failed'
@@ -576,121 +1211,60 @@ interface TestResults {
   results: TestResult[]
 }
 
-function runTests(module: StoredModule): TestResults {
-  // Mock test runner - in real implementation would use a sandboxed executor
-  const startTime = Date.now()
-  const results: TestResult[] = []
+async function runTests(module: StoredModule, timeout?: number): Promise<TestResults> {
+  const result = await workerRunTests(module.module, module.tests, timeout || 5000)
 
-  // Parse test file to extract test cases (simplified)
-  const testMatches = module.tests.matchAll(/it\s*\(\s*['"]([^'"]+)['"]/g)
-  let passed = 0
-  let failed = 0
-
-  for (const match of testMatches) {
-    const testName = match[1]
-    // Check if this is the @test/failing module
-    const isFailing = module.name === '@test/failing' ||
-                      module.tests.includes('expect(fail())') ||
-                      module.tests.includes('expect(add(2, 3)).toBe(5)') && module.module.includes('return a - b')
-
-    if (isFailing) {
-      failed++
-      results.push({
-        name: testName,
-        status: 'failed',
-        duration: Math.random() * 10,
-        error: {
-          message: 'Expected value to be equal',
-          stack: 'Error: Expected value to be equal\n    at test.js:1:1'
-        }
-      })
-    } else {
-      passed++
-      results.push({
-        name: testName,
-        status: 'passed',
-        duration: Math.random() * 10
-      })
-    }
-  }
+  // Convert WorkerTestResult to our TestResults format
+  const results: TestResult[] = result.tests.map(test => ({
+    name: test.name,
+    status: test.status,
+    duration: test.duration || 0,
+    error: test.error ? {
+      message: test.error,
+      stack: test.error
+    } : undefined
+  }))
 
   return {
-    passed,
-    failed,
-    total: passed + failed,
-    duration: Date.now() - startTime,
+    passed: result.passed,
+    failed: result.failed,
+    total: result.total,
+    duration: result.duration,
     results
   }
 }
 
-// Helper: Run script (simplified mock)
+// Helper: Run script using worker-compatible sandbox
 interface RunResult {
   result?: unknown
-  logs: string[]
+  logs: Array<{ level: string; args: unknown[] } | string>
   duration: number
   error?: string
   stack?: string
 }
 
-function runScript(module: StoredModule, input?: Record<string, unknown>, timeout?: number): RunResult {
-  const startTime = Date.now()
-  const logs: string[] = []
+async function runScript(module: StoredModule, input?: Record<string, unknown>, timeout?: number): Promise<RunResult> {
+  const result = await workerRunScript(module.module, module.script, input, timeout || 5000)
 
-  // Check for infinite loop module
-  if (module.name === '@test/infinite') {
-    if (timeout && timeout < 1000) {
-      return {
-        logs,
-        duration: timeout,
-        error: 'Script execution timeout exceeded',
-      }
-    }
-  }
+  // Convert logs to the expected format
+  const logs = result.logs.map(log => ({
+    level: log.level,
+    args: log.args
+  }))
 
-  // Check for throwing module
-  if (module.name === '@test/throwing') {
+  if (!result.success) {
     return {
       logs,
-      duration: Date.now() - startTime,
-      error: 'Script error',
-      stack: 'Error: Script error\n    at throwError (script.js:1:1)'
+      duration: result.duration,
+      error: result.error,
+      stack: result.error
     }
-  }
-
-  // Check for sandbox module
-  if (module.name === '@test/sandbox') {
-    return {
-      result: { sandboxed: true },
-      logs,
-      duration: Date.now() - startTime
-    }
-  }
-
-  // Check for console.log in script
-  if (module.script.includes('console.log')) {
-    logs.push('Starting calculation')
-  }
-
-  // Mock execution result based on module
-  let result: unknown = undefined
-  if (module.name === '@math/add') {
-    if (input && typeof input.a === 'number' && typeof input.b === 'number') {
-      result = input.a + input.b
-    } else {
-      result = 3 // add(1, 2)
-    }
-  } else if (module.name === '@math/calculator') {
-    result = 2 // calculate("1 + 1")
-  } else if (module.script.includes('return double(21)')) {
-    result = 42
-  } else if (module.script.includes('return double(5)')) {
-    result = 10
   }
 
   return {
-    result,
+    result: result.value,
     logs,
-    duration: Date.now() - startTime
+    duration: result.duration
   }
 }
 
@@ -760,9 +1334,9 @@ function addRateLimitHeaders(response: Response, limit: number, remaining: numbe
   return response
 }
 
-// Helper: Validate module exists
-function getModuleOrThrow(fullName: string): StoredModule {
-  const module = moduleStore.get(fullName)
+// Helper: Validate module exists (async for GitxStorage)
+async function getModuleOrThrow(fullName: string, version?: string): Promise<StoredModule> {
+  const module = await gitxStorage.read(fullName, version)
   if (!module) {
     throw new NotFoundError(`Module '${fullName}' not found`)
   }
@@ -776,19 +1350,18 @@ async function handleGetModuleInfo(
   request: Request,
   requestId: string
 ): Promise<Response> {
-  const module = getModuleOrThrow(fullName)
+  // For versioned requests, try to read that specific version
+  const module = await gitxStorage.read(fullName, version)
 
-  // Check for version mismatch
-  if (version && version !== module.version) {
-    const versions = moduleVersions.get(fullName) || []
-    const versionExists = versions.some(v => v.hash === version)
-    if (!versionExists) {
+  if (!module) {
+    if (version) {
       return errorResponse(`version '${version}' not found for module '${fullName}'`, 404, requestId)
     }
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
   }
 
   const accept = request.headers.get('Accept') || 'application/json'
-  const versions = moduleVersions.get(fullName) || []
+  const versions = await gitxStorage.versions(fullName)
 
   // Analyze dependencies
   const dependencies: string[] = []
@@ -803,13 +1376,28 @@ async function handleGetModuleInfo(
     }
   }
 
+  // Extract scope info from module name
+  const nameParts = fullName.match(/^@([^/]+)\/(.+)$/)
+  const scopeName = nameParts ? nameParts[1] : ''
+
   const moduleInfo = {
     name: fullName,
-    version: version || module.version,
+    version: module.version,
     files: ['index.d.ts', 'index.mjs', 'index.test.js', 'index.script.js'],
-    versions: versions.map(v => v.hash),
+    versions: versions.map(v => ({
+      sha: v.version,
+      message: v.message,
+      timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : new Date(v.timestamp).toISOString(),
+    })),
     dependencies,
-    externalDependencies: externalDependencies.length > 0 ? externalDependencies : undefined
+    externalDependencies: externalDependencies.length > 0 ? externalDependencies : undefined,
+    // GitxStorage metadata
+    storage: {
+      type: 'gitx',
+      repository: `esm.do/${scopeName}`,
+      branch: 'main',
+      path: fullName.replace('@', ''),
+    }
   }
 
   if (accept.includes('text/html')) {
@@ -837,19 +1425,13 @@ async function handleGetTypes(
   request: Request,
   requestId: string
 ): Promise<Response> {
-  const module = moduleStore.get(fullName)
+  const module = await gitxStorage.read(fullName, version)
 
   if (!module) {
-    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
-  }
-
-  // Check for version mismatch
-  if (version && version !== module.version) {
-    const versions = moduleVersions.get(fullName) || []
-    const versionExists = versions.some(v => v.hash === version)
-    if (!versionExists) {
+    if (version) {
       return errorResponse(`version '${version}' not found for module '${fullName}'`, 404, requestId)
     }
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
   }
 
   const content = module.types
@@ -882,7 +1464,7 @@ async function handleGetModule(
   request: Request,
   requestId: string
 ): Promise<Response> {
-  const module = moduleStore.get(fullName)
+  const module = await gitxStorage.read(fullName, version)
 
   if (!module) {
     return errorResponse(`Module '${fullName}' not found`, 404, requestId)
@@ -917,7 +1499,7 @@ async function handleGetTests(
   fullName: string,
   requestId: string
 ): Promise<Response> {
-  const module = moduleStore.get(fullName)
+  const module = await gitxStorage.read(fullName)
 
   if (!module) {
     return errorResponse(`Module '${fullName}' not found`, 404, requestId)
@@ -937,7 +1519,7 @@ async function handleGetScript(
   fullName: string,
   requestId: string
 ): Promise<Response> {
-  const module = moduleStore.get(fullName)
+  const module = await gitxStorage.read(fullName)
 
   if (!module) {
     return errorResponse(`Module '${fullName}' not found`, 404, requestId)
@@ -957,7 +1539,7 @@ async function handleGetBundle(
   fullName: string,
   requestId: string
 ): Promise<Response> {
-  const module = moduleStore.get(fullName)
+  const module = await gitxStorage.read(fullName)
 
   if (!module) {
     return errorResponse(`Module '${fullName}' not found`, 404, requestId)
@@ -993,7 +1575,7 @@ async function handleCreateModule(
     module?: string
     tests?: string
     script?: string
-    options?: { force?: boolean }
+    options?: { force?: boolean; tag?: string; commitMessage?: string }
   }
 
   try {
@@ -1022,7 +1604,7 @@ async function handleCreateModule(
   }
 
   // Check if module exists
-  const existing = moduleStore.get(fullName)
+  const existing = await gitxStorage.read(fullName)
   const isUpdate = !!existing
 
   // Create module
@@ -1032,7 +1614,6 @@ async function handleCreateModule(
     module: body.module,
     tests: body.tests || '',
     script: body.script || '',
-    version: `v${Date.now()}`
   }
 
   // Run tests if provided
@@ -1040,7 +1621,7 @@ async function handleCreateModule(
   let warning: string | undefined
 
   if (body.tests) {
-    testResults = runTests(newModule)
+    testResults = await runTests(newModule)
 
     // Check for failing tests
     if (testResults.failed > 0 && !body.options?.force) {
@@ -1060,23 +1641,30 @@ async function handleCreateModule(
     }
   }
 
-  // Save module
-  moduleStore.set(fullName, newModule)
+  // Save module via GitxStorage
+  const writeResult = await gitxStorage.write(fullName, newModule)
 
-  // Update versions
-  const versions = moduleVersions.get(fullName) || []
-  versions.unshift({
-    hash: newModule.version!,
-    message: isUpdate ? 'Update' : 'Initial commit',
-    timestamp: Date.now(),
-    parent: versions.length > 0 ? versions[0].hash : undefined
-  })
-  moduleVersions.set(fullName, versions)
+  // Get commit info for response
+  const commitInfo = await gitxStorage.getCommit(writeResult.version)
+  const timestamp = new Date(commitInfo?.timestamp || Date.now()).toISOString()
 
   const response: Record<string, unknown> = {
     name: fullName,
-    version: newModule.version,
+    version: writeResult.version, // Git SHA
+    files: ['index.d.ts', 'index.mjs', 'index.test.js', 'index.script.js'],
+    commit: {
+      sha: writeResult.version,
+      message: body.options?.commitMessage || (isUpdate ? `Update ${fullName}` : `Create ${fullName}`),
+      author: 'esm.do',
+      timestamp,
+    },
     [isUpdate ? 'updated' : 'created']: true
+  }
+
+  // Add tag if provided
+  if (body.options?.tag) {
+    gitxStorage.createTag(fullName, body.options.tag, writeResult.version)
+    response.tag = body.options.tag
   }
 
   if (testResults) {
@@ -1093,15 +1681,28 @@ async function handleCreateModule(
 // Handle POST /:name/test - run tests
 async function handleRunTests(
   fullName: string,
+  request: Request,
   requestId: string
 ): Promise<Response> {
-  const module = moduleStore.get(fullName)
+  const module = await gitxStorage.read(fullName)
 
   if (!module) {
     return errorResponse(`Module '${fullName}' not found`, 404, requestId)
   }
 
-  const results = runTests(module)
+  let timeout: number | undefined
+
+  try {
+    const text = await request.text()
+    if (text) {
+      const body = JSON.parse(text)
+      timeout = body.timeout
+    }
+  } catch {
+    // Ignore parse errors for empty body
+  }
+
+  const results = await runTests(module, timeout)
   return jsonResponse(results)
 }
 
@@ -1111,7 +1712,7 @@ async function handleRunScript(
   request: Request,
   requestId: string
 ): Promise<Response> {
-  const module = moduleStore.get(fullName)
+  const module = await gitxStorage.read(fullName)
 
   if (!module) {
     return errorResponse(`Module '${fullName}' not found`, 404, requestId)
@@ -1131,7 +1732,7 @@ async function handleRunScript(
     // Ignore parse errors for empty body
   }
 
-  const result = runScript(module, input, timeout)
+  const result = await runScript(module, input, timeout)
 
   if (result.error) {
     if (result.error.includes('timeout')) {
@@ -1182,24 +1783,199 @@ async function handleDeleteModule(
     }
   }
 
-  const module = moduleStore.get(fullName)
+  const module = await gitxStorage.read(fullName)
 
   if (!module) {
     return errorResponse(`Module '${fullName}' not found`, 404, requestId)
   }
 
-  moduleStore.delete(fullName)
-  moduleVersions.delete(fullName)
+  // Get version before deletion for commit info
+  const lastVersion = module.version
+
+  await gitxStorage.delete(fullName)
+
+  // Create deletion commit info
+  const timestamp = new Date().toISOString()
 
   return jsonResponse({
     name: fullName,
-    deleted: true
+    deleted: true,
+    commit: {
+      sha: lastVersion || generateSha(`delete-${fullName}-${Date.now()}`),
+      message: `Delete ${fullName}`,
+      author: 'esm.do',
+      timestamp,
+    }
+  })
+}
+
+// Handle GET /:scope/ - list modules in scope
+async function handleListModules(
+  scope: string,
+  requestId: string
+): Promise<Response> {
+  const pattern = `@${scope}/*`
+  const modules = await gitxStorage.list(pattern)
+
+  return jsonResponse({
+    modules,
+    scope: `@${scope}`,
+    count: modules.length
+  })
+}
+
+// Handle GET /:name/diff - show diff between versions
+async function handleDiff(
+  fullName: string,
+  request: Request,
+  requestId: string
+): Promise<Response> {
+  const url = new URL(request.url)
+  const fromSha = url.searchParams.get('from')
+  const toSha = url.searchParams.get('to')
+
+  if (!fromSha || !toSha) {
+    return errorResponse('Missing from or to query parameters', 400, requestId)
+  }
+
+  // Read both versions
+  const fromModule = await gitxStorage.read(fullName, fromSha)
+  const toModule = await gitxStorage.read(fullName, toSha)
+
+  if (!fromModule || !toModule) {
+    return errorResponse('One or both versions not found', 404, requestId)
+  }
+
+  // Generate diff for the module content
+  // Use a simple word-level diff for changed lines
+  const fromLines = fromModule.module.split('\n')
+  const toLines = toModule.module.split('\n')
+
+  const diffLines: string[] = []
+  const maxLen = Math.max(fromLines.length, toLines.length)
+
+  for (let i = 0; i < maxLen; i++) {
+    const fromLine = fromLines[i]
+    const toLine = toLines[i]
+
+    if (fromLine !== toLine) {
+      if (fromLine !== undefined && toLine !== undefined) {
+        // Find common prefix and suffix to identify the changed part
+        let prefixLen = 0
+        while (prefixLen < fromLine.length && prefixLen < toLine.length && fromLine[prefixLen] === toLine[prefixLen]) {
+          prefixLen++
+        }
+        let suffixLen = 0
+        while (suffixLen < (fromLine.length - prefixLen) && suffixLen < (toLine.length - prefixLen) &&
+               fromLine[fromLine.length - 1 - suffixLen] === toLine[toLine.length - 1 - suffixLen]) {
+          suffixLen++
+        }
+
+        // Extend prefix backwards to include meaningful context (nearest statement keyword)
+        // Prefer 'return' over other keywords for the most relevant context
+        const returnPos = fromLine.lastIndexOf('return ', prefixLen)
+        if (returnPos !== -1) {
+          prefixLen = returnPos
+        } else {
+          // Fall back to other keywords
+          const contextKeywords = ['const ', 'let ', 'var ']
+          for (const keyword of contextKeywords) {
+            const keywordPos = fromLine.lastIndexOf(keyword, prefixLen)
+            if (keywordPos !== -1 && keywordPos < prefixLen) {
+              prefixLen = keywordPos
+              break
+            }
+          }
+        }
+
+        // Extract the changed parts with context
+        const fromChanged = fromLine.slice(prefixLen, fromLine.length - suffixLen)
+        const toChanged = toLine.slice(prefixLen, toLine.length - suffixLen)
+
+        // If there's a meaningful difference in a small part, show inline diff
+        if (fromChanged.length < 50 && toChanged.length < 50 && prefixLen > 0) {
+          diffLines.push(`- ${fromChanged}`)
+          diffLines.push(`+ ${toChanged}`)
+        } else {
+          diffLines.push(`- ${fromLine}`)
+          diffLines.push(`+ ${toLine}`)
+        }
+      } else {
+        if (fromLine !== undefined) {
+          diffLines.push(`- ${fromLine}`)
+        }
+        if (toLine !== undefined) {
+          diffLines.push(`+ ${toLine}`)
+        }
+      }
+    }
+  }
+
+  return jsonResponse({
+    from: fromSha,
+    to: toSha,
+    diff: diffLines.join('\n')
+  })
+}
+
+// Handle POST /:name/revert - revert to a previous version
+async function handleRevert(
+  fullName: string,
+  request: Request,
+  requestId: string
+): Promise<Response> {
+  let body: { to?: string }
+
+  try {
+    const text = await request.text()
+    body = JSON.parse(text)
+  } catch {
+    return errorResponse('Invalid JSON in request body', 400, requestId)
+  }
+
+  if (!body.to) {
+    return errorResponse('Missing "to" field in request body', 400, requestId)
+  }
+
+  // Get current version
+  const currentModule = await gitxStorage.read(fullName)
+  if (!currentModule) {
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
+  }
+  const fromVersion = currentModule.version
+
+  // Get the version to revert to
+  const targetModule = await gitxStorage.read(fullName, body.to)
+  if (!targetModule) {
+    return errorResponse(`Version '${body.to}' not found`, 404, requestId)
+  }
+
+  // Write the target module content as a new version
+  const writeResult = await gitxStorage.write(fullName, {
+    name: fullName,
+    types: targetModule.types,
+    module: targetModule.module,
+    tests: targetModule.tests,
+    script: targetModule.script,
+  })
+
+  return jsonResponse({
+    reverted: true,
+    from: fromVersion,
+    to: body.to,
+    newVersion: writeResult.version
   })
 }
 
 // Main fetch handler
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    // Set the unsafe_eval binding for dynamic code execution
+    unsafeEval = env.unsafe_eval
+
+    // Initialize test modules on first request
+    await initTestModules()
+
     const url = new URL(request.url)
     const path = url.pathname
     const method = request.method
@@ -1223,6 +1999,13 @@ export default {
 
     if (!rateLimit.allowed) {
       return addRateLimitHeaders(errorResponse('Rate limit exceeded', 429, requestId))
+    }
+
+    // Handle scope listing (e.g., /storage/ to list modules in @storage scope)
+    const listMatch = path.match(/^\/([a-zA-Z0-9_-]+)\/$/)
+    if (listMatch && method === 'GET') {
+      const scope = listMatch[1]
+      return addRateLimitHeaders(await handleListModules(scope, requestId))
     }
 
     // Parse the path
@@ -1251,7 +2034,9 @@ export default {
     try {
       // Route based on method and path
       if (method === 'GET') {
-        if (extension === 'd.ts') {
+        if (action === 'diff') {
+          response = await handleDiff(fullName, request, requestId)
+        } else if (extension === 'd.ts') {
           response = await handleGetTypes(fullName, version, request, requestId)
         } else if (extension === 'mjs') {
           response = await handleGetModule(fullName, version, request, requestId)
@@ -1266,9 +2051,11 @@ export default {
         }
       } else if (method === 'POST') {
         if (action === 'test') {
-          response = await handleRunTests(fullName, requestId)
+          response = await handleRunTests(fullName, request, requestId)
         } else if (action === 'run') {
           response = await handleRunScript(fullName, request, requestId)
+        } else if (action === 'revert') {
+          response = await handleRevert(fullName, request, requestId)
         } else {
           response = await handleCreateModule(fullName, request, requestId)
         }

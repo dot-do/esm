@@ -488,14 +488,29 @@ export async function handleToolCall(
       }
 
       case 'esm_list': {
-        const result = await esm.list({
-          pattern: input.pattern as string | undefined,
-          scope: input.scope as string | undefined,
-        })
-        if (result.length === 0) {
+        const pattern = input.pattern as string | undefined
+        const scope = input.scope as string | undefined
+
+        // Pass filter parameters to esm.list
+        const result = await esm.list({ pattern, scope })
+
+        // Apply client-side filtering for handlers that don't implement filtering
+        let filtered = result
+
+        // Filter by scope (module name starts with scope)
+        if (scope) {
+          filtered = filtered.filter((m) => m.name.startsWith(scope))
+        }
+
+        // Filter by pattern (substring match on module name)
+        if (pattern) {
+          filtered = filtered.filter((m) => m.name.includes(pattern))
+        }
+
+        if (filtered.length === 0) {
           return successResponse('No modules found.')
         }
-        const list = result
+        const list = filtered
           .map((m) => `  ${m.name} (${m.version})`)
           .join('\n')
         return successResponse(`Modules:\n${list}`)
@@ -522,6 +537,12 @@ export async function handleToolCall(
           (input.to as string) || 'HEAD'
         )
         const summary = `Diff from ${result.from} to ${result.to}`
+
+        // Calculate total additions and deletions
+        const totalAdditions = result.changes.reduce((sum, c) => sum + c.additions, 0)
+        const totalDeletions = result.changes.reduce((sum, c) => sum + c.deletions, 0)
+        const stats = `${totalAdditions} additions, ${totalDeletions} deletions`
+
         const changes = result.changes
           .map(
             (c) =>
@@ -529,7 +550,7 @@ export async function handleToolCall(
           )
           .join('\n')
         return successResponse(
-          `${summary}\n\nChanges:\n${changes}\n\nPatch:\n${result.patch}`
+          `${summary}\n${stats}\n\nChanges:\n${changes}\n\nPatch:\n${result.patch}`
         )
       }
 

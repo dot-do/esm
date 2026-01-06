@@ -27,7 +27,127 @@ const DANGEROUS_PATTERNS = [
 
   // Dangerous Unicode characters that could be used for obfuscation (warnings only)
   { pattern: /[\u200B-\u200D\uFEFF]/g, severity: 'warning', message: 'Zero-width characters detected' },
+
+  // eval() calls - direct, window.eval, globalThis.eval, and indirect via assignment
+  { pattern: /\beval\s*\(/g, severity: 'error', message: 'eval() is not allowed - dynamic code execution is blocked' },
+  { pattern: /\bwindow\s*\.\s*eval\s*\(/g, severity: 'error', message: 'window.eval() is not allowed - dynamic code execution is blocked' },
+  { pattern: /\bglobalThis\s*\.\s*eval\s*\(/g, severity: 'error', message: 'globalThis.eval() is not allowed - dynamic code execution is blocked' },
+  { pattern: /=\s*eval\b/g, severity: 'error', message: 'Indirect eval assignment is not allowed - dynamic code execution is blocked' },
+
+  // Function constructor - new Function() and Function() calls
+  { pattern: /\bnew\s+Function\s*\(/g, severity: 'error', message: 'new Function() is not allowed - dynamic code execution is blocked' },
+  { pattern: /\bFunction\s*\(/g, severity: 'error', message: 'Function() constructor is not allowed - dynamic code execution is blocked' },
+
+  // Dynamic import() expressions
+  { pattern: /\bimport\s*\(/g, severity: 'error', message: 'Dynamic import() is not allowed - use static imports only' },
+
+  // Prototype pollution prevention - __proto__ access
+  { pattern: /__proto__/g, severity: 'error', message: 'Prototype pollution: __proto__ access is not allowed' },
+
+  // Prototype pollution prevention - Object.prototype modification
+  { pattern: /Object\s*\.\s*prototype/g, severity: 'error', message: 'Prototype pollution: Object.prototype modification is not allowed' },
+
+  // Prototype pollution prevention - Array.prototype modification
+  { pattern: /Array\s*\.\s*prototype/g, severity: 'error', message: 'Prototype pollution: Array.prototype modification is not allowed' },
+
+  // Prototype pollution prevention - Function.prototype modification
+  { pattern: /Function\s*\.\s*prototype/g, severity: 'error', message: 'Prototype pollution: Function.prototype modification is not allowed' },
+
+  // Prototype pollution prevention - constructor.prototype access
+  { pattern: /\.constructor\s*\.\s*prototype/g, severity: 'error', message: 'Prototype pollution: constructor.prototype access is not allowed' },
 ]
+
+/**
+ * Node.js built-in modules that should be blocked
+ */
+const BLOCKED_NODE_BUILTINS = [
+  'fs', 'fs/promises',
+  'child_process',
+  'path',
+  'os',
+  'http', 'https', 'http2',
+  'net',
+  'dgram',
+  'dns',
+  'tls',
+  'cluster',
+  'worker_threads',
+  'vm',
+  'process',
+  'crypto',
+  'buffer',
+  'stream',
+  'util',
+  'events',
+  'assert',
+  'readline',
+  'repl',
+  'module',
+  'url',
+  'querystring',
+  'string_decoder',
+  'timers',
+  'tty',
+  'v8',
+  'zlib',
+]
+
+/**
+ * Extract import specifiers from code
+ */
+function extractImportSpecifiers(code: string): string[] {
+  const specifiers: string[] = []
+
+  // Match static import statements: import ... from 'specifier'
+  const importFromRegex = /import\s+(?:[\w\s{},*]+\s+from\s+)?['"]([^'"]+)['"]/g
+  let match
+  while ((match = importFromRegex.exec(code)) !== null) {
+    specifiers.push(match[1])
+  }
+
+  // Match export ... from 'specifier'
+  const exportFromRegex = /export\s+(?:[\w\s{},*]+\s+from\s+)['"]([^'"]+)['"]/g
+  while ((match = exportFromRegex.exec(code)) !== null) {
+    specifiers.push(match[1])
+  }
+
+  return specifiers
+}
+
+/**
+ * Check if an import specifier is allowed
+ */
+function isAllowedImport(specifier: string): { allowed: boolean; reason?: string } {
+  // Allow relative imports
+  if (specifier.startsWith('./') || specifier.startsWith('../')) {
+    return { allowed: true }
+  }
+
+  // Allow esm.do imports
+  if (specifier.startsWith('esm.do/')) {
+    return { allowed: true }
+  }
+
+  // Block URL imports to external domains
+  if (specifier.startsWith('http://') || specifier.startsWith('https://')) {
+    return { allowed: false, reason: `External URL import '${specifier}' is not allowed` }
+  }
+
+  // Block Node.js built-ins
+  const baseModule = specifier.split('/')[0]
+  if (BLOCKED_NODE_BUILTINS.includes(baseModule) || BLOCKED_NODE_BUILTINS.includes(specifier)) {
+    return { allowed: false, reason: `Node.js built-in '${specifier}' is blocked` }
+  }
+
+  // Block node: protocol
+  if (specifier.startsWith('node:')) {
+    const moduleName = specifier.slice(5)
+    return { allowed: false, reason: `Node.js built-in 'node:${moduleName}' is blocked` }
+  }
+
+  // Block all other external packages (npm packages)
+  return { allowed: false, reason: `External package '${specifier}' is not allowed - only esm.do/ and relative imports are permitted` }
+}
 
 /**
  * Characters that should be normalized or escaped
@@ -60,12 +180,23 @@ export function sanitizeModuleCode(code: string): SanitizationResult {
 
   // Check for dangerous patterns
   for (const { pattern, severity, message } of DANGEROUS_PATTERNS) {
+    // Reset lastIndex for global regexes to ensure consistent matching
+    pattern.lastIndex = 0
     if (pattern.test(code)) {
       if (severity === 'error') {
         errors.push(message)
       } else {
         warnings.push(message)
       }
+    }
+  }
+
+  // Validate imports
+  const importSpecifiers = extractImportSpecifiers(code)
+  for (const specifier of importSpecifiers) {
+    const result = isAllowedImport(specifier)
+    if (!result.allowed && result.reason) {
+      errors.push(result.reason)
     }
   }
 
@@ -147,9 +278,9 @@ export function sanitizeTypeDefinitions(types: string): SanitizationResult {
   // Trim whitespace
   sanitized = sanitized.trim()
 
-  // Check for empty types
+  // Check for empty types - allow with warning (empty types are valid but unusual)
   if (!sanitized) {
-    errors.push('Type definitions are empty after sanitization')
+    warnings.push('Type definitions are empty')
   }
 
   return {

@@ -437,11 +437,13 @@ describe('isESMTestResult', () => {
     const allPassing = {
       passed: 3,
       failed: 0,
+      total: 3,
       results: [
         { name: 'test 1', passed: true, duration: 1 },
         { name: 'test 2', passed: true, duration: 2 },
         { name: 'test 3', passed: true, duration: 1 },
       ],
+      duration: 4,
     }
     expect(types.isESMTestResult(allPassing)).toBe(true)
   })
@@ -450,11 +452,13 @@ describe('isESMTestResult', () => {
     const mixed = {
       passed: 2,
       failed: 1,
+      total: 3,
       results: [
         { name: 'test 1', passed: true, duration: 1 },
         { name: 'test 2', passed: false, duration: 2, error: 'Assertion failed' },
         { name: 'test 3', passed: true, duration: 1 },
       ],
+      duration: 4,
     }
     expect(types.isESMTestResult(mixed)).toBe(true)
   })
@@ -463,7 +467,9 @@ describe('isESMTestResult', () => {
     const empty = {
       passed: 0,
       failed: 0,
+      total: 0,
       results: [],
+      duration: 0,
     }
     expect(types.isESMTestResult(empty)).toBe(true)
   })
@@ -471,7 +477,9 @@ describe('isESMTestResult', () => {
   it('should return false for objects missing passed', () => {
     const invalid = {
       failed: 0,
+      total: 0,
       results: [],
+      duration: 0,
     }
     expect(types.isESMTestResult(invalid)).toBe(false)
   })
@@ -479,7 +487,9 @@ describe('isESMTestResult', () => {
   it('should return false for objects missing failed', () => {
     const invalid = {
       passed: 0,
+      total: 0,
       results: [],
+      duration: 0,
     }
     expect(types.isESMTestResult(invalid)).toBe(false)
   })
@@ -488,6 +498,8 @@ describe('isESMTestResult', () => {
     const invalid = {
       passed: 0,
       failed: 0,
+      total: 0,
+      duration: 0,
     }
     expect(types.isESMTestResult(invalid)).toBe(false)
   })
@@ -1016,10 +1028,12 @@ describe('Executor Interface', () => {
         return {
           passed: 2,
           failed: 0,
+          total: 2,
           results: [
             { name: 'test 1', passed: true, duration: 1 },
             { name: 'test 2', passed: true, duration: 2 },
           ],
+          duration: 3,
         }
       },
       run: async () => ({ value: undefined, logs: [], errors: [] }),
