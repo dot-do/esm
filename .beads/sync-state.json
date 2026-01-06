@@ -1,0 +1,7 @@
+{
+  "last_failure": "2026-01-06T13:27:51.008867-06:00",
+  "failure_count": 1,
+  "backoff_until": "2026-01-06T13:28:21.008867-06:00",
+  "needs_manual_sync": false,
+  "failure_reason": "git pull failed in worktree: exit status 1\nfatal: unable to access 'https://github.com/dot-do/esm.git/': Could not resolve host: github.com\n"
+}
