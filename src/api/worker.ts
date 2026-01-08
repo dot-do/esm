@@ -1295,13 +1295,15 @@ async function withErrorHandling(
     if (error instanceof SyntaxError) {
       return errorResponse('Invalid JSON in request body', 400, requestId)
     }
-    // Log unexpected errors
+    // Log unexpected errors (full details go to console for debugging)
     console.error(`[${requestId}] Unexpected error:`, error)
+    // Note: Error details are intentionally omitted from responses for security.
+    // In Cloudflare Workers, process.env is not available.
+    // Error details in production responses can leak implementation details.
     return errorResponse(
       'Internal server error',
       500,
-      requestId,
-      process.env.NODE_ENV === 'development' ? { error: String(error) } : undefined
+      requestId
     )
   }
 }
