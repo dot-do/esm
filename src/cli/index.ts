@@ -13,7 +13,7 @@ import { Command } from 'commander'
 import { ESM } from '../esm.js'
 import { existsSync, readdirSync, readFileSync, statSync, watch as fsWatch, writeFileSync } from 'fs'
 import { dirname, join, resolve } from 'path'
-import { homedir, platform } from 'os'
+import { homedir, platform, release, type } from 'os'
 import { createHash } from 'crypto'
 import { execSync, spawn } from 'child_process'
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
@@ -2476,22 +2476,12 @@ function execCommand(command: string): string | null {
 }
 
 /**
- * Check if a command exists in PATH
- */
-function commandExists(command: string): boolean {
-  const result = spawnSync(process.platform === 'win32' ? 'where' : 'which', [command], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  })
-  return result.status === 0
-}
-
-/**
  * Parse semver version string to compare versions
  */
 function parseVersion(version: string): number[] {
   const match = version.match(/(\d+)\.(\d+)\.(\d+)/)
   if (!match) return [0, 0, 0]
-  return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)]
+  return [parseInt(match[1]!, 10), parseInt(match[2]!, 10), parseInt(match[3]!, 10)]
 }
 
 /**
@@ -2499,8 +2489,8 @@ function parseVersion(version: string): number[] {
  */
 function compareVersions(v1: number[], v2: number[]): number {
   for (let i = 0; i < 3; i++) {
-    if (v1[i] > v2[i]) return 1
-    if (v1[i] < v2[i]) return -1
+    if (v1[i]! > v2[i]!) return 1
+    if (v1[i]! < v2[i]!) return -1
   }
   return 0
 }
@@ -2517,13 +2507,6 @@ function formatCheck(passed: boolean, label: string, detail?: string): string {
     : (chalk ? chalk.red(label) : label)
   const detailText = detail ? ` ${chalk ? chalk.cyan(detail) : detail}` : ''
   return `${icon} ${labelText}${detailText}`
-}
-
-/**
- * Format a warning for display
- */
-function formatWarning(message: string): string {
-  return chalk ? chalk.yellow(`  \u26A0 ${message}`) : `  ! ${message}`
 }
 
 // ============================================================================
@@ -2546,10 +2529,10 @@ program
 
       // Check available deploy targets
       const deployTargets: Record<string, boolean> = {
-        wrangler: commandExists('wrangler'),
-        vercel: commandExists('vercel'),
-        fly: commandExists('fly') || commandExists('flyctl'),
-        docker: commandExists('docker'),
+        wrangler: checkToolInstalled('wrangler'),
+        vercel: checkToolInstalled('vercel'),
+        fly: checkToolInstalled('fly') || checkToolInstalled('flyctl'),
+        docker: checkToolInstalled('docker'),
       }
 
       const info = {
@@ -2613,9 +2596,9 @@ program
 interface DoctorCheck {
   name: string
   passed: boolean
-  version?: string
-  message?: string
-  suggestion?: string
+  version?: string | undefined
+  message?: string | undefined
+  suggestion?: string | undefined
 }
 
 program
@@ -2714,7 +2697,7 @@ program
     ]
 
     for (const cli of optionalClis) {
-      const exists = commandExists(cli.command) || (cli.altCommand && commandExists(cli.altCommand))
+      const exists = checkToolInstalled(cli.command) || (cli.altCommand && checkToolInstalled(cli.altCommand))
       const version = exists ? execCommand(cli.versionCmd) : null
       checks.push({
         name: cli.name,
