@@ -1,0 +1,258 @@
+# =============================================================================
+# Caddy Configuration for esm.do
+# High-performance reverse proxy with automatic HTTPS
+# =============================================================================
+
+# Global options
+{
+	# Email for ACME account (Let's Encrypt notifications)
+	email {$ACME_EMAIL:admin@esm.do}
+
+	# Enable HTTP/3
+	servers {
+		protocols h1 h2 h3
+	}
+
+	# Admin API (disabled in production for security)
+	admin off
+
+	# Enable OCSP stapling
+	ocsp_stapling on
+
+	# Grace period for graceful shutdown
+	grace_period 30s
+
+	# Log format
+	log {
+		format json
+		level INFO
+	}
+}
+
+# Rate limiting snippet
+(rate_limit) {
+	rate_limit {
+		zone esm_global {
+			key {remote_host}
+			events 100
+			window 1m
+		}
+		zone esm_api {
+			key {remote_host}
+			events 60
+			window 1m
+		}
+	}
+}
+
+# Security headers snippet
+(security_headers) {
+	header {
+		# Security headers
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		X-XSS-Protection "1; mode=block"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+
+		# HSTS (1 year, including subdomains)
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+		# Remove server identification
+		-Server
+		-X-Powered-By
+
+		# Cache control for API responses
+		Cache-Control "public, max-age=300, stale-while-revalidate=60"
+	}
+}
+
+# Compression snippet
+(compression) {
+	encode {
+		zstd
+		gzip
+		minimum_length 256
+	}
+}
+
+# Logging snippet
+(logging) {
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 100mb
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json {
+			time_format iso8601
+		}
+		level INFO
+	}
+}
+
+# =============================================================================
+# Main Site Configuration
+# =============================================================================
+
+# Production domain
+esm.do, www.esm.do {
+	# Import common configurations
+	import security_headers
+	import compression
+	import logging
+
+	# TLS configuration (automatic with Let's Encrypt)
+	tls {
+		protocols tls1.2 tls1.3
+		ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+	}
+
+	# Redirect www to non-www
+	@www host www.esm.do
+	redir @www https://esm.do{uri} permanent
+
+	# Health check endpoint (bypass rate limiting)
+	@health path /health /healthz /ready
+	handle @health {
+		reverse_proxy esm-do:8787 {
+			header_up Host {upstream_hostport}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	# API rate limiting
+	@api path /api/*
+	handle @api {
+		# Rate limit API endpoints more strictly
+		# Note: rate_limit requires the caddy-rate-limit plugin
+		reverse_proxy esm-do:8787 {
+			header_up Host {upstream_hostport}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+
+			# Load balancing (if multiple workers)
+			# lb_policy round_robin
+			# lb_try_duration 30s
+			# lb_try_interval 250ms
+
+			# Health checks
+			health_uri /health
+			health_interval 30s
+			health_timeout 10s
+
+			# Timeouts
+			transport http {
+				dial_timeout 30s
+				response_header_timeout 60s
+				read_timeout 120s
+				write_timeout 120s
+			}
+		}
+
+		# Override cache for API
+		header Cache-Control "no-store, no-cache, must-revalidate"
+	}
+
+	# Static assets with longer cache
+	@static path *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.gif *.svg *.ico
+	handle @static {
+		reverse_proxy esm-do:8787 {
+			header_up Host {upstream_hostport}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+		header Cache-Control "public, max-age=31536000, immutable"
+	}
+
+	# Main handler for all other requests
+	handle {
+		reverse_proxy esm-do:8787 {
+			header_up Host {upstream_hostport}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Request-ID {uuid}
+
+			# Retry configuration
+			@retry_condition expression `{http.reverse_proxy.status_code} in [502, 503, 504]`
+			retry_on @retry_condition
+			retry_count 2
+
+			# Buffer configuration
+			flush_interval -1
+
+			# Health checks for upstream
+			health_uri /health
+			health_interval 30s
+			health_timeout 10s
+			health_status 200
+
+			# Connection timeouts
+			transport http {
+				dial_timeout 30s
+				response_header_timeout 60s
+				read_timeout 120s
+				write_timeout 120s
+				keepalive 30s
+				keepalive_idle_conns 100
+				max_conns_per_host 100
+			}
+		}
+	}
+
+	# Error handling
+	handle_errors {
+		@502-504 expression `{err.status_code} in [502, 503, 504]`
+		handle @502-504 {
+			respond "Service temporarily unavailable. Please try again." 503
+		}
+		handle {
+			respond "Error: {err.status_code}" {err.status_code}
+		}
+	}
+}
+
+# =============================================================================
+# Development/Local Configuration
+# =============================================================================
+
+:80, :443, localhost, localhost:443 {
+	# Import common configurations
+	import security_headers
+	import compression
+
+	# Use internal/self-signed certificates for local development
+	tls internal
+
+	# Simple logging for development
+	log {
+		output stdout
+		format console
+		level DEBUG
+	}
+
+	# Reverse proxy to worker
+	reverse_proxy esm-do:8787 {
+		header_up Host {upstream_hostport}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
+
+# =============================================================================
+# Metrics endpoint (internal only)
+# =============================================================================
+
+:9999 {
+	# Prometheus metrics
+	metrics /metrics
+
+	# Health check for Caddy itself
+	respond /health "OK" 200
+}
