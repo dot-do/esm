@@ -1,0 +1,26 @@
+config:
+  esm-do:projectName: esm-do
+  esm-do:enableAws: false
+  esm-do:enableGcp: false
+  esm-do:enableAzure: false
+  esm-do:enableCloudflare: true
+  esm-do:enableKubernetes: false
+
+  # AWS Configuration (when enabled)
+  aws:region: us-east-1
+
+  # GCP Configuration (when enabled)
+  # gcp:project: your-gcp-project-id
+  # gcp:region: us-central1
+
+  # Azure Configuration (when enabled)
+  # azure-native:location: eastus
+
+  # Cloudflare Configuration
+  # cloudflare:accountId: your-account-id
+  # cloudflare:apiToken:
+  #   secure: encrypted-api-token
+
+  # Kubernetes Configuration (when enabled)
+  # kubernetes:kubeconfig: path/to/kubeconfig
+  # kubernetes:image: ghcr.io/dot-do/esm:dev

@@ -1,0 +1,10 @@
+name: esm-do
+description: Infrastructure as Code for esm.do worker deployment across multiple cloud platforms
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: typescript
