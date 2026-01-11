@@ -21,9 +21,15 @@ export interface SingleTestResult {
 export interface TestResult {
   passed: number
   failed: number
-  total?: number
+  total: number
+  duration: number
+  /** @deprecated Use 'results' instead - kept for backward compatibility */
+  tests: SingleTestResult[]
   results: SingleTestResult[]
-  duration?: number
+  metrics?: {
+    compilationTime: number
+    executionTime: number
+  }
 }
 
 /**
@@ -38,11 +44,26 @@ export interface LogEntry {
  * Result from running a script
  */
 export interface RunResult {
-  value: unknown
-  logs: LogEntry[]
-  success?: boolean
+  success: boolean
+  value?: unknown
   error?: string
+  logs: LogEntry[]
   duration?: number
+  metrics?: {
+    compilationTime: number
+    executionTime: number
+  }
+}
+
+/**
+ * Validation error type
+ */
+export interface ValidationError {
+  type: 'missing_export' | 'undeclared_export' | 'type_mismatch' | 'arity_mismatch' | 'syntax_error'
+  name?: string
+  message?: string
+  expected?: string | number
+  actual?: string | number
 }
 
 /**
@@ -50,13 +71,7 @@ export interface RunResult {
  */
 export interface ValidationResult {
   valid: boolean
-  errors: Array<{
-    type: string
-    name?: string
-    message?: string
-    expected?: string | number
-    actual?: string | number
-  }>
+  errors: ValidationError[]
 }
 
 /**
@@ -64,6 +79,14 @@ export interface ValidationResult {
  */
 export interface TestOptions {
   timeout?: number
+}
+
+/**
+ * Options for script execution
+ */
+export interface RunOptions {
+  timeout?: number
+  memoryLimit?: number
 }
 
 /**
@@ -91,17 +114,18 @@ export interface Executor {
    * @param module - The module source code
    * @param script - The script to execute
    * @param args - Optional arguments to pass to the script
+   * @param options - Optional execution options (timeout, memory limit)
    * @returns Execution result with value and logs
    */
-  run(module: string, script: string, args?: Record<string, unknown>): Promise<RunResult>
+  run(module: string, script: string, args?: Record<string, unknown>, options?: RunOptions): Promise<RunResult>
 
   /**
    * Validate module exports against type declarations (optional)
-   * @param module - The module source code
    * @param types - The TypeScript type declarations
+   * @param module - The module source code
    * @returns Validation result with errors if any
    */
-  validate?(module: string, types: string): Promise<ValidationResult>
+  validate?(types: string, module: string): Promise<ValidationResult>
 }
 
 /**

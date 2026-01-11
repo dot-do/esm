@@ -60,7 +60,29 @@
 
 import { evaluate, type EvaluateResult, type TestResults as AITestResults } from 'ai-evaluate'
 import { sanitizeModuleCode, sanitizeTestCode, sanitizeScriptCode } from './sanitize.js'
-import type { Executor, ValidationResult as ExecutorValidationResult } from './types.js'
+import type {
+  Executor,
+  ValidationResult,
+  ValidationError,
+  TestResult,
+  SingleTestResult,
+  RunResult,
+  LogEntry,
+  TestOptions,
+  RunOptions,
+} from './types.js'
+
+// Re-export types for consumers
+export type {
+  ValidationResult,
+  ValidationError,
+  TestResult,
+  SingleTestResult as TestCaseResult,
+  RunResult,
+  LogEntry,
+  TestOptions,
+  RunOptions,
+}
 
 /**
  * Wraps a promise with a timeout that rejects if the operation takes too long.
@@ -79,68 +101,6 @@ async function withTimeout<T>(promise: Promise<T>, timeout: number, timeoutMessa
   } finally {
     clearTimeout(timeoutId!)
   }
-}
-
-// Type definitions
-
-export interface ValidationError {
-  type: 'missing_export' | 'undeclared_export' | 'type_mismatch' | 'arity_mismatch' | 'syntax_error'
-  name?: string
-  message?: string
-  expected?: string | number
-  actual?: string | number
-}
-
-export interface ValidationResult {
-  valid: boolean
-  errors: ValidationError[]
-}
-
-export interface TestCaseResult {
-  name: string
-  status: 'passed' | 'failed' | 'skipped'
-  error?: string
-  duration?: number
-}
-
-export interface TestResult {
-  passed: number
-  failed: number
-  total: number
-  duration: number
-  /** @deprecated Use 'results' instead - kept for backward compatibility */
-  tests: TestCaseResult[]
-  results: TestCaseResult[]
-  metrics?: {
-    compilationTime: number
-    executionTime: number
-  }
-}
-
-export interface LogEntry {
-  level: 'log' | 'warn' | 'error' | 'info' | 'debug'
-  args: unknown[]
-}
-
-export interface RunResult {
-  success: boolean
-  value?: unknown
-  error?: string
-  logs: LogEntry[]
-  duration: number
-  metrics?: {
-    compilationTime: number
-    executionTime: number
-  }
-}
-
-export interface TestOptions {
-  timeout?: number
-}
-
-export interface RunOptions {
-  timeout?: number
-  memoryLimit?: number
 }
 
 // Generate memory tracking code to inject into sandbox
@@ -348,7 +308,7 @@ function convertLogs(aiLogs: Array<{ level: string; message: string; timestamp: 
 }
 
 // Convert ai-evaluate test results to our TestResult format
-function convertTestResults(aiResults: AITestResults): TestCaseResult[] {
+function convertTestResults(aiResults: AITestResults): SingleTestResult[] {
   return aiResults.tests.map(test => ({
     name: test.name,
     status: test.passed ? 'passed' : 'failed',
@@ -362,7 +322,7 @@ export class SandboxExecutor implements Executor {
    * Validate that module exports match type declarations
    * Implements Executor.validate
    */
-  async validate(module: string, types: string): Promise<ExecutorValidationResult> {
+  async validate(types: string, module: string): Promise<ValidationResult> {
     const errors: ValidationError[] = []
 
     try {

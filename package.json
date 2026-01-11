@@ -24,11 +24,13 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build:core": "tsc -p core/tsconfig.json",
+    "build:src": "tsc",
+    "build": "npm run build:core && npm run build:src",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "npm run build:core && tsc --noEmit",
     "lint": "eslint src --ext .ts"
   },
   "keywords": [
@@ -55,6 +57,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@dotdo/esm": "workspace:*",
     "ai-evaluate": "^2.0.2",
     "commander": "^12.1.0"
   },

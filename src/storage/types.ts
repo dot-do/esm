@@ -1,11 +1,33 @@
 /**
  * Storage layer types for esm.do
  *
- * Defines the interfaces for content-addressed storage via gitx.do
+ * Re-exports shared types from @dotdo/esm core and defines
+ * src-specific types for gitx.do content-addressed storage.
  */
+
+// =============================================================================
+// Re-export shared types from @dotdo/esm for backward compatibility
+// =============================================================================
+
+export type {
+  StorageTier,
+  ModuleInput,
+} from '@dotdo/esm'
+
+export {
+  ModuleStorageSymbol,
+} from '@dotdo/esm'
+
+// =============================================================================
+// Src-specific types for gitx.do integration
+// These differ from core types to support git-like versioning semantics
+// =============================================================================
 
 /**
  * A stored ESM module with all four files
+ *
+ * This extends the core StoredModule with optional version/timestamp fields
+ * for gitx.do compatibility (versions come from git commits).
  */
 export interface StoredModule {
   /** Module name (e.g., "@math/add") */
@@ -18,7 +40,7 @@ export interface StoredModule {
   tests: string
   /** Script file content (.script.js) */
   script: string
-  /** Version hash (set when read from storage) */
+  /** Version hash (set when read from storage, from git commit SHA) */
   version?: string
   /** Timestamp when the module was first created */
   createdAt?: Date
@@ -28,6 +50,8 @@ export interface StoredModule {
 
 /**
  * Result of writing a module to storage
+ *
+ * Includes module name for gitx.do reference tracking.
  */
 export interface WriteResult {
   /** The commit hash for this version */
@@ -38,6 +62,8 @@ export interface WriteResult {
 
 /**
  * Version information from commit history
+ *
+ * This uses git-style versioning with parent commit tracking.
  */
 export interface ModuleVersion {
   /** Version identifier (commit hash) */
@@ -54,6 +80,7 @@ export interface ModuleVersion {
  * GitX client interface for content-addressed storage
  *
  * This mirrors the gitx.do API for blob/tree/commit/ref operations.
+ * Unique to src/ - not in core package.
  */
 export interface GitxClient {
   // Blob operations
@@ -91,6 +118,9 @@ export interface GitxClient {
 
 /**
  * Storage interface for ESM modules
+ *
+ * This interface is compatible with core ModuleStorage but uses
+ * src-specific StoredModule and WriteResult types for gitx.do.
  */
 export interface ModuleStorage {
   /**

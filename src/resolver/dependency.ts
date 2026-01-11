@@ -4,6 +4,13 @@
  * This module provides dependency resolution for ESM modules that import
  * from other esm.do modules using the esm.do/@scope/name import syntax.
  *
+ * This is the extended src/ version that adds:
+ * - Alias support for imports (import { x as y })
+ * - Re-export handling (export { x } from '...')
+ * - Default export detection
+ *
+ * Base types are imported from @dotdo/esm core package.
+ *
  * Features:
  * - Parse import statements from module source
  * - Build dependency graph
@@ -20,70 +27,28 @@
 
 import { CircularDependencyError } from '../errors.js'
 
+// Import base types from @dotdo/esm core
+import type {
+  ParsedImport as CoreParsedImport,
+  DependencyNode,
+  DependencyGraph,
+  ResolvedModule,
+  ModuleFetcher,
+} from '@dotdo/esm'
+
 /**
- * Parsed import information
+ * Extended ParsedImport with alias and re-export support
+ * Extends the core ParsedImport interface
  */
-export interface ParsedImport {
-  /** The full import statement */
-  statement: string
-  /** The imported module specifier (e.g., 'esm.do/@math/base') */
-  specifier: string
-  /** The module name extracted from specifier (e.g., '@math/base') */
-  moduleName: string
-  /** Named imports (e.g., ['double', 'triple']) */
-  namedImports: string[]
+export interface ParsedImport extends CoreParsedImport {
   /** Aliases for named imports (e.g., { 'originalName': 'alias' }) */
   aliases?: Record<string, string>
-  /** Default import name if present */
-  defaultImport?: string
-  /** Namespace import name if present (import * as name) */
-  namespaceImport?: string
   /** Whether this is a re-export statement */
   isReexport?: boolean
 }
 
-/**
- * Dependency graph node
- */
-export interface DependencyNode {
-  /** Module name */
-  module: string
-  /** Direct dependencies */
-  dependencies: string[]
-  /** Whether this module has been resolved */
-  resolved: boolean
-  /** Module source code (after resolution) */
-  source?: string
-}
-
-/**
- * Dependency graph
- */
-export interface DependencyGraph {
-  /** Entry point module */
-  entry: string
-  /** All nodes in the graph */
-  nodes: Map<string, DependencyNode>
-}
-
-/**
- * Resolved module with all dependencies inlined
- */
-export interface ResolvedModule {
-  /** Original module name */
-  name: string
-  /** Resolved source code with imports replaced */
-  source: string
-  /** List of resolved dependencies in topological order */
-  dependencies: string[]
-}
-
-/**
- * Module fetcher interface - allows ESM class to provide module lookup
- */
-export interface ModuleFetcher {
-  (name: string): Promise<{ module: string } | null>
-}
+// Re-export core types for backward compatibility
+export type { DependencyNode, DependencyGraph, ResolvedModule, ModuleFetcher }
 
 /**
  * Cache entry for resolved modules
@@ -119,6 +84,8 @@ const HAS_ESM_IMPORT = /(?:import|export)[^]*esm\.do\/@/
  *
  * Resolves imports from esm.do modules and builds a dependency graph.
  * Includes caching and memoization for improved performance.
+ *
+ * This is the extended version with alias and re-export support.
  */
 export class DependencyResolver {
   private fetcher: ModuleFetcher

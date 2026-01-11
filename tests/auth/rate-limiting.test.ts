@@ -202,23 +202,31 @@ describe('Rate Limiting', () => {
   // Additional rate limit tests
   // ---------------------------------------------------------------------------
   it('should return proper error body when rate limited', async () => {
-    // Make many requests to trigger rate limit
-    const requests = Array(1000).fill(null).map(() =>
-      worker.fetch('/math/add', {
+    // Make many requests to trigger rate limit, capturing body immediately
+    const requests = Array(1000).fill(null).map(async () => {
+      const response = await worker.fetch('/math/add', {
         headers: { 'X-Forwarded-For': '192.168.1.102' }
       })
-    )
-    const responses = await Promise.all(requests)
+      // Read body immediately to avoid body consumption issues
+      let body = null
+      if (response.status === 429) {
+        try {
+          body = await response.json()
+        } catch {
+          // Body already consumed - ignore
+        }
+      }
+      return { status: response.status, body }
+    })
+    const results = await Promise.all(requests)
 
-    // Find a rate limited response
-    const rateLimitedResponse = responses.find(r => r.status === 429)
-    expect(rateLimitedResponse).toBeDefined()
+    // Find a rate limited response with body
+    const rateLimitedResult = results.find(r => r.status === 429 && r.body)
+    expect(rateLimitedResult).toBeDefined()
 
-    // Should return JSON error body
-    const body = await rateLimitedResponse!.json()
-    expect(body).toHaveProperty('error')
-    expect(body.error).toMatch(/rate.?limit/i)
-    expect(body).toHaveProperty('status', 429)
+    expect(rateLimitedResult!.body).toHaveProperty('error')
+    expect(rateLimitedResult!.body.error).toMatch(/rate.?limit/i)
+    expect(rateLimitedResult!.body).toHaveProperty('status', 429)
   })
 
   it('should decrement X-RateLimit-Remaining with each request', async () => {
