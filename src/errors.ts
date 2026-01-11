@@ -44,3 +44,12 @@ export class StorageError extends ESMError {
     this.operation = operation;
   }
 }
+
+export class CircularDependencyError extends ESMError {
+  cycle: string[];
+  constructor(cycle: string[]) {
+    super(`Circular dependency detected: ${cycle.join(' -> ')}`, 'CIRCULAR_DEPENDENCY');
+    this.name = 'CircularDependencyError';
+    this.cycle = cycle;
+  }
+}

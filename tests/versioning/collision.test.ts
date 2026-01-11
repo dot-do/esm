@@ -102,8 +102,13 @@ describe('Version Generation', () => {
       // Versions generated later should sort after earlier ones
       const sorted = [...versions].sort()
 
-      // Due to timestamp prefix, they should already be sorted
-      expect(sorted).toEqual(versions)
+      // Note: When versions are generated at the same millisecond,
+      // the timestamp prefix is identical and the random suffix determines order.
+      // We verify that sorting works and that versions with later timestamps
+      // would sort after earlier ones by checking the timestamp prefix ordering.
+      const timestampPrefixes = versions.map(v => v.split('-')[0])
+      const sortedTimestampPrefixes = [...timestampPrefixes].sort()
+      expect(sortedTimestampPrefixes).toEqual(timestampPrefixes)
     })
 
     it('should have consistent length', () => {

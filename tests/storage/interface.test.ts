@@ -43,7 +43,7 @@ describe('ModuleStorage Interface', () => {
 
   describe('GitxStorage implementation', () => {
     it('should implement ModuleStorage interface', async () => {
-      const { GitxStorage } = await import('../../core/storage/gitx.js')
+      const { GitxStorage } = await import('../../src/storage/gitx.js')
 
       expect(GitxStorage).toBeDefined()
       // Verify it can be instantiated

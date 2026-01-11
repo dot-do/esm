@@ -173,10 +173,11 @@ describe('Rate Limiting', () => {
   // ---------------------------------------------------------------------------
   it('should apply rate limits per IP address', async () => {
     // Request from IP A - exhaust rate limit
+    // Use cf-connecting-ip header which the worker prioritizes for rate limiting
     const ipA = '10.0.0.1'
     const ipARequests = Array(1000).fill(null).map(() =>
       worker.fetch('/math/add', {
-        headers: { 'X-Forwarded-For': ipA }
+        headers: { 'cf-connecting-ip': ipA }
       })
     )
     const ipAResponses = await Promise.all(ipARequests)
@@ -186,9 +187,10 @@ describe('Rate Limiting', () => {
     expect(ipARateLimited).toBe(true)
 
     // Request from IP B - should still have quota
+    // Use a unique IP that hasn't been used by any other test
     const ipB = '10.0.0.2'
     const ipBResponse = await worker.fetch('/math/add', {
-      headers: { 'X-Forwarded-For': ipB }
+      headers: { 'cf-connecting-ip': ipB }
     })
 
     // IP B should NOT be rate limited (assuming it hasn't made requests before)
@@ -220,17 +222,19 @@ describe('Rate Limiting', () => {
   })
 
   it('should decrement X-RateLimit-Remaining with each request', async () => {
-    const ip = '192.168.1.103'
+    // Use a unique IP that's not used by other tests to ensure fresh rate limit quota
+    // Use cf-connecting-ip header which the worker prioritizes for rate limiting
+    const ip = '172.16.0.1'
 
     // Make first request
     const response1 = await worker.fetch('/math/add', {
-      headers: { 'X-Forwarded-For': ip }
+      headers: { 'cf-connecting-ip': ip }
     })
     const remaining1 = parseInt(response1.headers.get('x-ratelimit-remaining') || '0', 10)
 
     // Make second request
     const response2 = await worker.fetch('/math/add', {
-      headers: { 'X-Forwarded-For': ip }
+      headers: { 'cf-connecting-ip': ip }
     })
     const remaining2 = parseInt(response2.headers.get('x-ratelimit-remaining') || '0', 10)
 

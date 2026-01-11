@@ -18,6 +18,8 @@
  * - Early return optimizations
  */
 
+import { CircularDependencyError } from '../errors.js'
+
 /**
  * Parsed import information
  */
@@ -30,10 +32,14 @@ export interface ParsedImport {
   moduleName: string
   /** Named imports (e.g., ['double', 'triple']) */
   namedImports: string[]
+  /** Aliases for named imports (e.g., { 'originalName': 'alias' }) */
+  aliases?: Record<string, string>
   /** Default import name if present */
   defaultImport?: string
   /** Namespace import name if present (import * as name) */
   namespaceImport?: string
+  /** Whether this is a re-export statement */
+  isReexport?: boolean
 }
 
 /**
@@ -97,14 +103,16 @@ interface GraphCacheEntry {
 
 // Pre-compiled regex patterns for performance
 const IMPORT_REGEX = /import\s+(?:(\w+)\s*,?\s*)?(?:\*\s+as\s+(\w+)|{([^}]+)})?\s*from\s*['"]esm\.do\/(@[^'"]+)['"]/g
+const REEXPORT_REGEX = /export\s+{([^}]+)}\s*from\s*['"]esm\.do\/(@[^'"]+)['"]/g
 const ALIAS_REGEX = /(\w+)\s+as\s+(\w+)/
 const EXPORT_FUNC_REGEX = /export\s+(?:async\s+)?function\s+(\w+)/g
 const EXPORT_CONST_REGEX = /export\s+const\s+(\w+)/g
 const EXPORT_LET_REGEX = /export\s+let\s+(\w+)/g
 const EXPORT_CLASS_REGEX = /export\s+class\s+(\w+)/g
+const EXPORT_DEFAULT_VALUE_REGEX = /export\s+default\s+/
 
 // Quick check pattern (non-capturing for speed)
-const HAS_ESM_IMPORT = /import[^]*esm\.do\/@/
+const HAS_ESM_IMPORT = /(?:import|export)[^]*esm\.do\/@/
 
 /**
  * DependencyResolver class
@@ -194,6 +202,7 @@ export class DependencyResolver {
       if (!statement || !moduleName) continue
 
       const namedImports: string[] = []
+      const aliases: Record<string, string> = {}
       if (namedImportsStr) {
         // Parse named imports, handling aliases
         const parts = namedImportsStr.split(',')
@@ -201,11 +210,13 @@ export class DependencyResolver {
           const partRaw = parts[i]
           const part = partRaw?.trim()
           if (!part) continue
-          // Handle "name as alias" pattern - we want the original name
+          // Handle "name as alias" pattern - we want the original name but also track the alias
           const asMatch = ALIAS_REGEX.exec(part)
-          const matchedName = asMatch?.[1]
-          if (matchedName) {
-            namedImports.push(matchedName)
+          const originalName = asMatch?.[1]
+          const aliasName = asMatch?.[2]
+          if (originalName && aliasName) {
+            namedImports.push(originalName)
+            aliases[originalName] = aliasName
           } else {
             namedImports.push(part)
           }
@@ -218,8 +229,47 @@ export class DependencyResolver {
         moduleName,
         namedImports,
       }
+      if (Object.keys(aliases).length > 0) importEntry.aliases = aliases
       if (defaultImport) importEntry.defaultImport = defaultImport
       if (namespaceImport) importEntry.namespaceImport = namespaceImport
+      imports.push(importEntry)
+    }
+
+    // Also match re-export statements: export { X } from 'esm.do/@scope/module'
+    REEXPORT_REGEX.lastIndex = 0
+    while ((match = REEXPORT_REGEX.exec(source)) !== null) {
+      const [statement, namedExportsStr, moduleName] = match
+
+      if (!statement || !moduleName) continue
+
+      const namedImports: string[] = []
+      const aliases: Record<string, string> = {}
+      if (namedExportsStr) {
+        const parts = namedExportsStr.split(',')
+        for (let i = 0; i < parts.length; i++) {
+          const partRaw = parts[i]
+          const part = partRaw?.trim()
+          if (!part) continue
+          const asMatch = ALIAS_REGEX.exec(part)
+          const originalName = asMatch?.[1]
+          const aliasName = asMatch?.[2]
+          if (originalName && aliasName) {
+            namedImports.push(originalName)
+            aliases[originalName] = aliasName
+          } else {
+            namedImports.push(part)
+          }
+        }
+      }
+
+      const importEntry: ParsedImport = {
+        statement,
+        specifier: `esm.do/${moduleName}`,
+        moduleName,
+        namedImports,
+        isReexport: true,
+      }
+      if (Object.keys(aliases).length > 0) importEntry.aliases = aliases
       imports.push(importEntry)
     }
 
@@ -420,7 +470,7 @@ export class DependencyResolver {
     // Check for circular dependencies
     const cycle = this.detectCircular(graph)
     if (cycle) {
-      throw new Error(`Circular dependency detected: ${cycle.join(' -> ')}`)
+      throw new CircularDependencyError(cycle)
     }
 
     // Get dependencies in topological order
@@ -445,11 +495,18 @@ export class DependencyResolver {
         // Wrap in a scope to avoid name conflicts, expose exports via a namespace
         const safeName = this.toSafeName(depName)
         const exportNames = this.extractExportNames(node.source)
+        // Build return object - handle default export specially (default_ -> default)
+        const returnProps = exportNames.map(name => {
+          if (name === 'default') {
+            return 'default: default_'
+          }
+          return name
+        })
         sourceParts.push(`
 // === Dependency: ${depName} ===
 const ${safeName} = (() => {
 ${rewrittenSource}
-return { ${exportNames.join(', ')} };
+return { ${returnProps.join(', ')} };
 })();
 `)
       }
@@ -495,8 +552,27 @@ ${entrySource}
 
       // Build replacement based on import type
       let replacement = ''
-      if (imp.namedImports.length > 0) {
-        replacement = `const { ${imp.namedImports.join(', ')} } = ${safeName};`
+      if (imp.isReexport) {
+        // Re-export: export { X } from 'esm.do/...' -> export const X = _module.X;
+        const reexports = imp.namedImports.map(name => {
+          const alias = imp.aliases?.[name] || name
+          return `export const ${alias} = ${safeName}.${name};`
+        })
+        replacement = reexports.join('\n')
+      } else if (imp.namedImports.length > 0) {
+        // Handle aliased imports: { originalName as alias } -> const alias = _module.originalName
+        if (imp.aliases && Object.keys(imp.aliases).length > 0) {
+          const destructures = imp.namedImports.map(name => {
+            const alias = imp.aliases?.[name]
+            if (alias) {
+              return `${name}: ${alias}`
+            }
+            return name
+          })
+          replacement = `const { ${destructures.join(', ')} } = ${safeName};`
+        } else {
+          replacement = `const { ${imp.namedImports.join(', ')} } = ${safeName};`
+        }
       } else if (imp.namespaceImport) {
         replacement = `const ${imp.namespaceImport} = ${safeName};`
       } else if (imp.defaultImport) {
@@ -518,6 +594,8 @@ ${entrySource}
       .replace(/export\s+const\s+/g, 'const ')
       .replace(/export\s+let\s+/g, 'let ')
       .replace(/export\s+class\s+/g, 'class ')
+      // Handle default export: export default X -> const default = X
+      .replace(/export\s+default\s+/g, 'const default_ = ')
   }
 
   /**
@@ -585,6 +663,25 @@ ${entrySource}
     while ((match = EXPORT_CLASS_REGEX.exec(source)) !== null) {
       const name = match[1]
       if (name) names.push(name)
+    }
+
+    // Check for default export (export default ...)
+    if (EXPORT_DEFAULT_VALUE_REGEX.test(source)) {
+      names.push('default')
+    }
+
+    // Also check for re-exports: export { X } from '...' or export { X as Y } from '...'
+    // After rewriting, these become: export const X = _module.X;
+    // So we need to include any names from re-export statements
+    const reexports = this.parseImports(source).filter(imp => imp.isReexport)
+    for (const reexport of reexports) {
+      for (const name of reexport.namedImports) {
+        // Use alias if present, otherwise original name
+        const exportedName = reexport.aliases?.[name] || name
+        if (!names.includes(exportedName)) {
+          names.push(exportedName)
+        }
+      }
     }
 
     // Cache the result

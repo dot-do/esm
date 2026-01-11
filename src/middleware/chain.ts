@@ -18,7 +18,7 @@ export function applyMiddleware(
   handler: Handler,
   ...middleware: Middleware[]
 ): Handler {
-  return middleware.reduceRight(
+  return middleware.reduceRight<Handler>(
     (h, m) => (ctx) => m(ctx, () => h(ctx)),
     handler
   )

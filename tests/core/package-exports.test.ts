@@ -11,7 +11,7 @@ describe('@dotdo/esm Core Package Exports', () => {
   it('should export type definitions', async () => {
     const core = await import('../../core/index.js')
     expect(core.isESMModule).toBeDefined()
-    expect(core.isStorage).toBeDefined()
+    expect(core.isModuleStorage).toBeDefined()
     expect(core.createESMModule).toBeDefined()
   })
 

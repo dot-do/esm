@@ -15,14 +15,14 @@ export {
   type Middleware,
   applyMiddleware,
   compose,
-} from './chain'
+} from './chain.js'
 
 // CORS middleware
 export {
   type CorsConfig,
   type CorsMiddleware,
   createCorsMiddleware,
-} from './cors'
+} from './cors.js'
 
 // Authentication middleware
 export {
@@ -31,7 +31,7 @@ export {
   type AuthResult,
   type AuthMiddleware,
   createAuthMiddleware,
-} from './auth'
+} from './auth.js'
 
 // Security headers middleware
 export {
@@ -45,4 +45,4 @@ export {
   getSecurePreset,
   getApiPreset,
   getRelaxedPreset,
-} from './security-headers'
+} from './security-headers.js'

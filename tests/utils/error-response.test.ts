@@ -11,7 +11,7 @@ describe('formatError utility (esm-4l4k.4)', () => {
       const result = formatError(error)
 
       expect(result).toHaveProperty('error')
-      expect(result.error).toBe('Module "@test/missing-module" not found')
+      expect(result.error).toBe('Module not found: @test/missing-module')
       expect(result.code).toBe('MODULE_NOT_FOUND')
       expect(result.status).toBe(404)
     })

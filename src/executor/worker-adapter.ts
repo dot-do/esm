@@ -80,11 +80,11 @@
 
 import { extractExportNames } from '../utils/exports.js'
 import type {
-  Executor,
-  TestResult as ExecutorTestResult,
-  RunResult as ExecutorRunResult,
-  TestOptions as ExecutorTestOptions,
-} from '../../core/executor/types.js'
+  CoreExecutor,
+  CoreTestResult as ExecutorTestResult,
+  CoreRunResult as ExecutorRunResult,
+  CoreTestOptions as ExecutorTestOptions,
+} from '../types.js'
 
 // =============================================================================
 // Types that match the interfaces in worker/routes/module.ts
@@ -328,7 +328,7 @@ function createTestRunner() {
  * - TestExecutor.runTests() for running module tests
  * - ScriptExecutor.runScript() for executing module scripts
  */
-export class WorkerExecutorAdapter implements Executor, TestExecutor, ScriptExecutor {
+export class WorkerExecutorAdapter implements CoreExecutor, TestExecutor, ScriptExecutor {
   private unsafeEval: WorkerEnv['unsafe_eval'] | null = null
   private defaultTimeout: number
 
@@ -575,12 +575,15 @@ export class WorkerExecutorAdapter implements Executor, TestExecutor, ScriptExec
       passed: result.passed,
       failed: result.failed,
       total: result.total,
-      results: result.tests.map((t) => ({
-        name: t.name,
-        status: t.status,
-        error: t.error,
-        duration: t.duration,
-      })),
+      results: result.tests.map((t) => {
+        const testResult: ExecutorTestResult['results'][number] = {
+          name: t.name,
+          status: t.status,
+        }
+        if (t.error !== undefined) testResult.error = t.error
+        if (t.duration !== undefined) testResult.duration = t.duration
+        return testResult
+      }),
       duration: result.duration,
     }
   }
@@ -598,16 +601,17 @@ export class WorkerExecutorAdapter implements Executor, TestExecutor, ScriptExec
     args?: Record<string, unknown>
   ): Promise<ExecutorRunResult> {
     const result = await this.runScript(module, script, args)
-    return {
+    const runResult: ExecutorRunResult = {
       value: result.value,
       logs: result.logs.map((log) => ({
         level: log.level as 'log' | 'warn' | 'error' | 'info' | 'debug',
         args: log.args,
       })),
-      success: result.success,
-      error: result.error,
-      duration: result.duration,
     }
+    if (result.success !== undefined) runResult.success = result.success
+    if (result.error !== undefined) runResult.error = result.error
+    if (result.duration !== undefined) runResult.duration = result.duration
+    return runResult
   }
 }
 

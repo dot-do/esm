@@ -457,9 +457,14 @@ export class ESM {
   /**
    * Execute tests and return results using SandboxExecutor
    */
-  private async executeTests(moduleCode: string, testsCode: string, _resolveModule?: (name: string) => Record<string, unknown>): Promise<TestResult> {
+  private async executeTests(moduleCode: string, testsCode: string, moduleName?: string): Promise<TestResult> {
+    // Resolve dependencies if module has esm.do imports
+    const resolvedCode = moduleName
+      ? await this.resolveDependencies(moduleName, moduleCode)
+      : moduleCode
+
     // Use SandboxExecutor.test for safe test execution
-    const sandboxResult = await this.sandbox.test(moduleCode, testsCode)
+    const sandboxResult = await this.sandbox.test(resolvedCode, testsCode)
 
     // Convert SandboxExecutor test results to ESM TestResult format
     const results: SingleTestResult[] = sandboxResult.tests.map(t => ({
@@ -550,7 +555,7 @@ export class ESM {
     // If tests are provided, run them first using sandbox
     let testResults: TestResult | undefined
     if (options.tests) {
-      testResults = await this.executeTests(options.module, options.tests)
+      testResults = await this.executeTests(options.module, options.tests, options.name)
       // Only reject if ALL tests fail (no tests passed)
       if (testResults.failed > 0 && testResults.passed === 0) {
         throw new ExecutionError(`Tests failed: ${testResults.failed} of ${testResults.total} tests failed`)
@@ -809,7 +814,7 @@ export class ESM {
       throw new ValidationError(`Module ${name} has no tests`, { name, field: 'tests' })
     }
 
-    const result = await this.executeTests(module.module, module.tests)
+    const result = await this.executeTests(module.module, module.tests, name)
 
     // Apply filter if provided
     if (filter) {
