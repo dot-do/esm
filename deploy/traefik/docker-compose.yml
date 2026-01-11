@@ -1,0 +1,206 @@
+# Docker Compose for Traefik + esm.do
+# Production-ready reverse proxy configuration
+
+version: "3.8"
+
+services:
+  # Traefik reverse proxy
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8082:8082"  # Metrics (internal only in production)
+    volumes:
+      # Docker socket for service discovery
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Static configuration
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      # Dynamic configuration directory
+      - ./dynamic:/etc/traefik/dynamic:ro
+      # Let's Encrypt certificates storage
+      - letsencrypt-data:/letsencrypt
+      # Logs
+      - traefik-logs:/var/log/traefik
+    environment:
+      # For DNS challenge (Cloudflare example)
+      # - CF_API_EMAIL=${CF_API_EMAIL}
+      # - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+      - TZ=UTC
+    networks:
+      - traefik-network
+    labels:
+      # Enable Traefik for this container
+      - "traefik.enable=true"
+      # Dashboard route (handled via dynamic config, but label as backup)
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.esm.do`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=https"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ESM.do worker service
+  esm-do:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile
+    container_name: esm-do
+    restart: unless-stopped
+    expose:
+      - "8787"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://esm:${POSTGRES_PASSWORD:-esm}@postgres:5432/esm
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - traefik-network
+      - backend-network
+    labels:
+      # Enable Traefik discovery
+      - "traefik.enable=true"
+      # Docker network to use
+      - "traefik.docker.network=traefik-network"
+      # Main router
+      - "traefik.http.routers.esm-do.rule=Host(`esm.do`) || Host(`www.esm.do`)"
+      - "traefik.http.routers.esm-do.entrypoints=https"
+      - "traefik.http.routers.esm-do.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.esm-do.middlewares=security-headers@file,rate-limit@file,compress@file,www-redirect@file"
+      # Service configuration
+      - "traefik.http.services.esm-do.loadbalancer.server.port=8787"
+      - "traefik.http.services.esm-do.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.esm-do.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.esm-do.loadbalancer.passHostHeader=true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: esm-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # PostgreSQL for persistent storage
+  postgres:
+    image: postgres:16-alpine
+    container_name: esm-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-esm}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-esm}
+      - POSTGRES_DB=${POSTGRES_DB:-esm}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-esm} -d ${POSTGRES_DB:-esm}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: esm-prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    volumes:
+      - ../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - traefik-network
+      - backend-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.esm.do`)"
+      - "traefik.http.routers.prometheus.entrypoints=https"
+      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.prometheus.middlewares=dashboard-auth@file"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # External-facing network for Traefik
+  traefik-network:
+    driver: bridge
+    name: traefik-network
+  # Internal network for backend services
+  backend-network:
+    driver: bridge
+    internal: true
+
+volumes:
+  letsencrypt-data:
+    name: esm-letsencrypt
+  traefik-logs:
+    name: esm-traefik-logs
+  redis-data:
+    name: esm-redis-data
+  postgres-data:
+    name: esm-postgres-data
+  prometheus-data:
+    name: esm-prometheus-data

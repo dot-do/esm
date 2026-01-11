@@ -1,0 +1,243 @@
+# Traefik Dynamic Configuration for esm.do
+# Router rules, services, and middleware definitions
+
+# HTTP configuration
+http:
+  # Routers
+  routers:
+    # Main esm.do router
+    esm-do:
+      rule: "Host(`esm.do`) || Host(`www.esm.do`)"
+      entryPoints:
+        - https
+      service: esm-do-service
+      middlewares:
+        - security-headers
+        - rate-limit
+        - compress
+      tls:
+        certResolver: letsencrypt
+
+    # API router for esm.do/api/*
+    esm-do-api:
+      rule: "Host(`esm.do`) && PathPrefix(`/api`)"
+      entryPoints:
+        - https
+      service: esm-do-service
+      middlewares:
+        - security-headers
+        - api-rate-limit
+        - compress
+        - cors-api
+      priority: 100
+      tls:
+        certResolver: letsencrypt
+
+    # Module resolution router for esm.do/{package}
+    esm-do-modules:
+      rule: "Host(`esm.do`) && PathPrefix(`/`)"
+      entryPoints:
+        - https
+      service: esm-do-service
+      middlewares:
+        - security-headers
+        - rate-limit
+        - compress
+        - cache-modules
+      priority: 50
+      tls:
+        certResolver: letsencrypt
+
+    # Health check router (no rate limit)
+    esm-do-health:
+      rule: "Host(`esm.do`) && Path(`/health`)"
+      entryPoints:
+        - https
+      service: esm-do-service
+      middlewares:
+        - security-headers
+      priority: 200
+      tls:
+        certResolver: letsencrypt
+
+    # Traefik dashboard (protected)
+    dashboard:
+      rule: "Host(`traefik.esm.do`)"
+      entryPoints:
+        - https
+      service: api@internal
+      middlewares:
+        - dashboard-auth
+        - security-headers
+      tls:
+        certResolver: letsencrypt
+
+  # Services
+  services:
+    esm-do-service:
+      loadBalancer:
+        servers:
+          - url: "http://esm-do:8787"
+        healthCheck:
+          path: /health
+          interval: 10s
+          timeout: 5s
+          scheme: http
+        passHostHeader: true
+        responseForwarding:
+          flushInterval: 100ms
+
+  # Middleware definitions
+  middlewares:
+    # Security headers middleware
+    security-headers:
+      headers:
+        # HSTS
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        # Prevent clickjacking
+        frameDeny: true
+        # XSS protection
+        browserXssFilter: true
+        # Content type sniffing
+        contentTypeNosniff: true
+        # Referrer policy
+        referrerPolicy: "strict-origin-when-cross-origin"
+        # Content Security Policy
+        contentSecurityPolicy: |
+          default-src 'self';
+          script-src 'self' 'unsafe-inline' 'unsafe-eval';
+          style-src 'self' 'unsafe-inline';
+          img-src 'self' data: https:;
+          font-src 'self' data:;
+          connect-src 'self' https:;
+          frame-ancestors 'none';
+        # Permissions Policy
+        permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=()"
+        # Custom headers
+        customResponseHeaders:
+          X-Powered-By: "esm.do"
+          X-Service: "esm-module-resolver"
+
+    # Rate limiting for general traffic
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 200
+        period: 1m
+        sourceCriterion:
+          ipStrategy:
+            depth: 1
+            excludedIPs:
+              - "127.0.0.1/32"
+              - "10.0.0.0/8"
+              - "172.16.0.0/12"
+              - "192.168.0.0/16"
+
+    # Stricter rate limiting for API endpoints
+    api-rate-limit:
+      rateLimit:
+        average: 60
+        burst: 100
+        period: 1m
+        sourceCriterion:
+          ipStrategy:
+            depth: 1
+
+    # Compression middleware
+    compress:
+      compress:
+        excludedContentTypes:
+          - "text/event-stream"
+        minResponseBodyBytes: 1024
+
+    # CORS middleware for API
+    cors-api:
+      headers:
+        accessControlAllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        accessControlAllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Requested-With
+        accessControlAllowOriginList:
+          - "https://esm.do"
+          - "https://www.esm.do"
+        accessControlMaxAge: 86400
+        addVaryHeader: true
+
+    # Cache headers for module resolution
+    cache-modules:
+      headers:
+        customResponseHeaders:
+          Cache-Control: "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800"
+          Vary: "Accept-Encoding"
+
+    # Dashboard authentication (basic auth)
+    dashboard-auth:
+      basicAuth:
+        users:
+          # Generate with: htpasswd -nb admin <password>
+          # Default: admin:traefik (CHANGE IN PRODUCTION!)
+          - "admin:$apr1$rHGWFgVF$eGpLNS1/XqTdTcGqUqRO4."
+        removeHeader: true
+        realm: "Traefik Dashboard"
+
+    # Retry middleware for resilience
+    retry:
+      retry:
+        attempts: 3
+        initialInterval: 100ms
+
+    # Circuit breaker for backend protection
+    circuit-breaker:
+      circuitBreaker:
+        expression: "ResponseCodeRatio(500, 600, 0, 600) > 0.30"
+        checkPeriod: 10s
+        fallbackDuration: 30s
+        recoveryDuration: 60s
+
+    # www to non-www redirect
+    www-redirect:
+      redirectRegex:
+        regex: "^https://www\\.esm\\.do/(.*)"
+        replacement: "https://esm.do/${1}"
+        permanent: true
+
+    # Trailing slash strip
+    strip-trailing-slash:
+      stripPrefix:
+        prefixes:
+          - "/"
+        forceSlash: false
+
+# TCP configuration (if needed for WebSocket upgrades)
+tcp:
+  routers: {}
+  services: {}
+
+# TLS configuration
+tls:
+  options:
+    default:
+      minVersion: VersionTLS12
+      maxVersion: VersionTLS13
+      cipherSuites:
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+      curvePreferences:
+        - X25519
+        - CurveP256
+        - CurveP384
+      sniStrict: true
+
+    modern:
+      minVersion: VersionTLS13
+      sniStrict: true
