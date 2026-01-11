@@ -264,9 +264,69 @@ export function sum(numbers) {
 
 ## Installation
 
+### Quick Install (Recommended)
+
 ```bash
+# Universal installer - auto-detects your system
+curl -fsSL https://esm.do/install | bash
+```
+
+### Via npm
+
+```bash
+# Global installation
+npm install -g esm.do
+
+# Or as a project dependency
 npm install esm.do
 ```
+
+### Via Homebrew (macOS/Linux)
+
+```bash
+# Add the tap and install
+brew tap dot-do/esm https://github.com/dot-do/esm
+brew install esm-do
+
+# Or install directly
+brew install dot-do/esm/esm-do
+```
+
+### Via pnpm
+
+```bash
+pnpm add -g esm.do
+```
+
+### Via yarn
+
+```bash
+yarn global add esm.do
+```
+
+### Verify Installation
+
+```bash
+esm --version
+esm --help
+```
+
+### Uninstall
+
+```bash
+# Via installer script
+curl -fsSL https://esm.do/uninstall | bash
+
+# Or manually
+npm uninstall -g esm.do    # if installed via npm
+brew uninstall esm-do      # if installed via Homebrew
+```
+
+### Requirements
+
+- Node.js 18 or later
+- npm, pnpm, or yarn (for package manager installation)
+- Homebrew (for macOS/Linux Homebrew installation)
 
 ## License
 
