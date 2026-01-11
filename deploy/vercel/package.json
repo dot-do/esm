@@ -1,0 +1,28 @@
+{
+  "name": "esm-do-vercel",
+  "version": "0.0.1",
+  "description": "esm.do Vercel Edge Functions deployment",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "vercel build",
+    "deploy": "vercel --prod",
+    "deploy:preview": "vercel",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts"
+  },
+  "dependencies": {
+    "next": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vercel/edge": "^1.1.1",
+    "eslint": "^8.57.0",
+    "typescript": "^5.7.2",
+    "vercel": "^37.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

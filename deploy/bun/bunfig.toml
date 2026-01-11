@@ -1,0 +1,91 @@
+# =============================================================================
+# esm.do Bun Configuration
+# =============================================================================
+# This file configures Bun's behavior for the esm.do project.
+# Documentation: https://bun.sh/docs/runtime/bunfig
+# =============================================================================
+
+# =============================================================================
+# Build Settings
+# =============================================================================
+
+[build]
+# Output directory for bundled files
+outdir = "./dist"
+
+# Target environment
+target = "bun"
+
+# Enable minification for production builds
+minify = true
+
+# Generate source maps
+sourcemap = "external"
+
+# Split code for better caching
+splitting = true
+
+# =============================================================================
+# Test Settings
+# =============================================================================
+
+[test]
+# Enable coverage collection
+coverage = true
+
+# Coverage output directory
+coverage-dir = "./coverage"
+
+# Test timeout in milliseconds
+timeout = 30000
+
+# Number of parallel test workers
+# Set to 1 for debugging, higher for faster execution
+# workers = auto (defaults to CPU count)
+
+# Fail fast on first test failure (useful for CI)
+# bail = true
+
+# =============================================================================
+# Install Settings
+# =============================================================================
+
+[install]
+# Use lockfile for reproducible installs
+lockfile = "bun.lockb"
+
+# Production mode - skip devDependencies
+# Set via BUN_ENV=production
+# production = false
+
+# Prefer offline installations when possible
+# offline = false
+
+# Registry for npm packages
+# registry = "https://registry.npmjs.org"
+
+# =============================================================================
+# Runtime Settings
+# =============================================================================
+
+# Enable hot module reloading for development
+# Run with: bun run --hot server.ts
+
+# Preload scripts (run before main script)
+# preload = ["./setup.ts"]
+
+# =============================================================================
+# Module Resolution
+# =============================================================================
+
+# Define module aliases
+# [install.alias]
+# "@esm" = "./src"
+# "@core" = "./core/src"
+
+# =============================================================================
+# TypeScript Settings
+# =============================================================================
+
+# Bun has native TypeScript support
+# Additional options can be configured in tsconfig.json

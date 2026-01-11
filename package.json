@@ -33,7 +33,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "npm run build:core && tsc --noEmit",
-    "lint": "eslint src --ext .ts"
+    "lint": "eslint src --ext .ts",
+    "bun:dev": "bun run --hot deploy/bun/server.ts",
+    "bun:build": "bun run deploy/bun/build.ts"
   },
   "keywords": [
     "esm",
