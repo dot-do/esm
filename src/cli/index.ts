@@ -11,9 +11,12 @@
 
 import { Command } from 'commander'
 import { ESM } from '../esm.js'
-import { readFileSync, writeFileSync, existsSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
+import { existsSync, readFileSync, watch as fsWatch, writeFileSync } from 'fs'
+import { dirname, join, resolve } from 'path'
+import { homedir, platform } from 'os'
+import { execSync, spawn } from 'child_process'
+import { createServer, type IncomingMessage, type ServerResponse } from 'http'
+import { fileURLToPath } from 'url'
 
 // Chalk type definition for optional chalk usage
 interface ChalkLike {
@@ -650,6 +653,307 @@ configCmd
     const config = loadConfig()
     for (const [key, value] of Object.entries(config)) {
       console.log(`${key}=${value}`)
+    }
+  })
+
+// ============================================================================
+// server command
+// ============================================================================
+program
+  .command('server')
+  .alias('serve')
+  .description('Start local development server')
+  .option('-p, --port <port>', 'Port to listen on', '8787')
+  .option('-H, --host <host>', 'Host to bind to', 'localhost')
+  .option('--no-open', 'Do not open browser')
+  .option('-w, --watch', 'Watch for changes and reload')
+  .action(async (options: {
+    port: string
+    host: string
+    open: boolean
+    watch?: boolean
+  }) => {
+    const port = parseInt(options.port, 10)
+    const host = options.host
+
+    console.log('')
+    console.log(formatHeader('esm.do Development Server'))
+    console.log('')
+
+    // Track active connections for graceful shutdown
+    const connections = new Set<import('net').Socket>()
+
+    // Try to use miniflare for Workers-compatible execution
+    let useMiniflare = false
+    let mf: unknown = null
+
+    try {
+      // Dynamic import of miniflare
+      const { Miniflare } = await import('miniflare')
+
+      // Find the worker entry point
+      const __filename = fileURLToPath(import.meta.url)
+      const __dirname = dirname(__filename)
+      const workerPath = resolve(__dirname, '..', 'worker', 'index.js')
+
+      // Check if worker file exists (in dist)
+      if (existsSync(workerPath)) {
+        console.log(formatInfo('Using miniflare for Workers-compatible execution'))
+
+        mf = new Miniflare({
+          scriptPath: workerPath,
+          port,
+          host,
+          modules: true,
+          compatibilityDate: '2024-01-01',
+          compatibilityFlags: ['nodejs_compat'],
+          // Enable unsafe eval for dynamic code execution
+          unsafeEvalBinding: 'unsafe_eval',
+        })
+
+        useMiniflare = true
+      } else {
+        console.log(formatInfo('Worker not built, falling back to native HTTP server'))
+      }
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      console.log(formatInfo(`Miniflare not available (${error.message}), using native HTTP server`))
+    }
+
+    if (useMiniflare && mf) {
+      // Start miniflare server
+      const miniflareInstance = mf as { ready: Promise<URL>; dispose: () => Promise<void> }
+
+      try {
+        const url = await miniflareInstance.ready
+        console.log('')
+        console.log(formatSuccess(`Server running at ${url}`))
+        console.log('')
+        console.log('  API endpoints:')
+        console.log(`    GET  ${url}@scope/name       - Module info`)
+        console.log(`    GET  ${url}@scope/name.mjs   - Module code`)
+        console.log(`    GET  ${url}@scope/name.d.ts  - Type definitions`)
+        console.log(`    POST ${url}@scope/name       - Create/update module`)
+        console.log(`    POST ${url}@scope/name/test  - Run tests`)
+        console.log(`    POST ${url}@scope/name/run   - Execute script`)
+        console.log('')
+        console.log(formatInfo('Press Ctrl+C to stop'))
+        console.log('')
+
+        // Open browser if requested
+        if (options.open) {
+          const urlStr = url.toString()
+          try {
+            const openCmd = platform() === 'darwin' ? 'open' :
+                            platform() === 'win32' ? 'start' : 'xdg-open'
+            execSync(`${openCmd} ${urlStr}`, { stdio: 'ignore' })
+          } catch {
+            // Ignore errors opening browser
+          }
+        }
+
+        // Handle graceful shutdown
+        const shutdown = async () => {
+          console.log('')
+          console.log(formatInfo('Shutting down server...'))
+          await miniflareInstance.dispose()
+          console.log(formatSuccess('Server stopped'))
+          process.exit(0)
+        }
+
+        process.on('SIGINT', shutdown)
+        process.on('SIGTERM', shutdown)
+
+        // Keep process alive
+        await new Promise(() => {})
+      } catch (err: unknown) {
+        const error = err instanceof Error ? err : new Error(String(err))
+        console.error(formatError(`Failed to start miniflare: ${error.message}`))
+        process.exit(1)
+      }
+    } else {
+      // Fallback to native Node.js HTTP server with fetch adapter
+      console.log(formatInfo('Starting native HTTP server with ESM adapter'))
+
+      // Import the worker module dynamically for native execution
+      let workerHandler: { fetch: (request: Request, env: unknown) => Promise<Response> } | null = null
+
+      try {
+        // Try to import the compiled worker
+        const __filename = fileURLToPath(import.meta.url)
+        const __dirname = dirname(__filename)
+        const workerModule = await import(resolve(__dirname, '..', 'api', 'worker.js'))
+        workerHandler = workerModule.default
+      } catch {
+        console.log(formatInfo('Worker module not found, using simple ESM handler'))
+      }
+
+      const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+        // Track connection for graceful shutdown
+        const socket = req.socket
+        connections.add(socket)
+        socket.once('close', () => connections.delete(socket))
+
+        const url = new URL(req.url || '/', `http://${host}:${port}`)
+
+        // Create a Web API Request from Node.js IncomingMessage
+        const headers = new Headers()
+        for (const [key, value] of Object.entries(req.headers)) {
+          if (value) {
+            if (Array.isArray(value)) {
+              value.forEach(v => headers.append(key, v))
+            } else {
+              headers.set(key, value)
+            }
+          }
+        }
+
+        // Read request body if present
+        let body: string | undefined
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          const chunks: Buffer[] = []
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer)
+          }
+          body = Buffer.concat(chunks).toString('utf-8')
+        }
+
+        const requestInit: RequestInit = {
+          method: req.method || 'GET',
+          headers,
+        }
+        if (body) {
+          requestInit.body = body
+        }
+        const request = new Request(url.toString(), requestInit)
+
+        try {
+          let response: Response
+
+          if (workerHandler) {
+            // Use the worker handler with a mock env
+            const mockEnv = {
+              unsafe_eval: {
+                eval: (code: string) => eval(code),
+                newFunction: (...args: string[]) => new Function(...args),
+              }
+            }
+            response = await workerHandler.fetch(request, mockEnv)
+          } else {
+            // Simple fallback handler
+            response = new Response(JSON.stringify({
+              error: 'Worker not available',
+              message: 'Build the project first with: npm run build'
+            }), {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' }
+            })
+          }
+
+          // Send response
+          res.statusCode = response.status
+
+          // Copy headers
+          response.headers.forEach((value, key) => {
+            res.setHeader(key, value)
+          })
+
+          // Send body
+          const responseBody = await response.text()
+          res.end(responseBody)
+        } catch (err: unknown) {
+          const error = err instanceof Error ? err : new Error(String(err))
+          res.statusCode = 500
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ error: error.message }))
+        }
+      })
+
+      // Handle graceful shutdown
+      const shutdown = () => {
+        console.log('')
+        console.log(formatInfo('Shutting down server...'))
+
+        // Close all active connections
+        for (const socket of connections) {
+          socket.destroy()
+        }
+
+        server.close(() => {
+          console.log(formatSuccess('Server stopped'))
+          process.exit(0)
+        })
+
+        // Force exit after timeout
+        setTimeout(() => {
+          console.log(formatInfo('Force closing remaining connections...'))
+          process.exit(0)
+        }, 5000)
+      }
+
+      process.on('SIGINT', shutdown)
+      process.on('SIGTERM', shutdown)
+
+      // Watch for file changes if --watch flag is set
+      if (options.watch) {
+        console.log(formatInfo('Watch mode enabled - server will reload on changes'))
+
+        const __filename = fileURLToPath(import.meta.url)
+        const __dirname = dirname(__filename)
+        const srcDir = resolve(__dirname, '..')
+
+        if (existsSync(srcDir)) {
+          let debounceTimer: ReturnType<typeof setTimeout> | null = null
+
+          fsWatch(srcDir, { recursive: true }, (_eventType, filename) => {
+            if (filename && (filename.endsWith('.ts') || filename.endsWith('.js'))) {
+              if (debounceTimer) clearTimeout(debounceTimer)
+              debounceTimer = setTimeout(() => {
+                console.log(formatInfo(`File changed: ${filename}`))
+                console.log(formatInfo('Rebuild required: npm run build'))
+              }, 100)
+            }
+          })
+        }
+      }
+
+      server.listen(port, host, () => {
+        const serverUrl = `http://${host}:${port}`
+        console.log('')
+        console.log(formatSuccess(`Server running at ${serverUrl}`))
+        console.log('')
+        console.log('  API endpoints:')
+        console.log(`    GET  ${serverUrl}/@scope/name       - Module info`)
+        console.log(`    GET  ${serverUrl}/@scope/name.mjs   - Module code`)
+        console.log(`    GET  ${serverUrl}/@scope/name.d.ts  - Type definitions`)
+        console.log(`    POST ${serverUrl}/@scope/name       - Create/update module`)
+        console.log(`    POST ${serverUrl}/@scope/name/test  - Run tests`)
+        console.log(`    POST ${serverUrl}/@scope/name/run   - Execute script`)
+        console.log('')
+        console.log(formatInfo('Press Ctrl+C to stop'))
+        console.log('')
+
+        // Open browser if requested
+        if (options.open) {
+          try {
+            const openCmd = platform() === 'darwin' ? 'open' :
+                            platform() === 'win32' ? 'start' : 'xdg-open'
+            execSync(`${openCmd} ${serverUrl}`, { stdio: 'ignore' })
+          } catch {
+            // Ignore errors opening browser
+          }
+        }
+      })
+
+      server.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          console.error(formatError(`Port ${port} is already in use`))
+          console.log(formatInfo(`Try using a different port: esm server --port ${port + 1}`))
+        } else {
+          console.error(formatError(`Server error: ${err.message}`))
+        }
+        process.exit(1)
+      })
     }
   })
 
