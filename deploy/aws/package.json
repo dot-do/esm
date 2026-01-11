@@ -1,0 +1,53 @@
+{
+  "name": "@esm.do/aws-lambda",
+  "version": "0.0.1",
+  "description": "AWS Lambda deployment for esm.do ESM module system",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "esbuild handler.ts --bundle --platform=node --target=node20 --format=esm --outdir=dist --sourcemap --external:aws-sdk",
+    "build:prod": "esbuild handler.ts --bundle --platform=node --target=node20 --format=esm --outdir=dist --minify --sourcemap --external:aws-sdk",
+    "typecheck": "tsc --noEmit",
+    "deploy": "./deploy.sh",
+    "deploy:dev": "serverless deploy --stage dev",
+    "deploy:staging": "serverless deploy --stage staging",
+    "deploy:prod": "serverless deploy --stage prod",
+    "remove": "serverless remove",
+    "remove:dev": "serverless remove --stage dev",
+    "remove:staging": "serverless remove --stage staging",
+    "remove:prod": "serverless remove --stage prod",
+    "logs": "serverless logs -f api -t",
+    "logs:dev": "serverless logs -f api -t --stage dev",
+    "logs:prod": "serverless logs -f api -t --stage prod",
+    "info": "serverless info",
+    "offline": "serverless offline start",
+    "invoke": "serverless invoke -f api",
+    "invoke:local": "serverless invoke local -f api",
+    "package": "serverless package",
+    "domain:create": "serverless create_domain",
+    "domain:delete": "serverless delete_domain"
+  },
+  "dependencies": {
+    "esm.do": "file:../.."
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.0",
+    "serverless": "^3.40.0",
+    "serverless-domain-manager": "^7.4.0",
+    "serverless-esbuild": "^1.54.0",
+    "serverless-offline": "^14.4.0",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "esm",
+    "aws",
+    "lambda",
+    "serverless",
+    "api-gateway"
+  ]
+}

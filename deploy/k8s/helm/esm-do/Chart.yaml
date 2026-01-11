@@ -1,0 +1,36 @@
+apiVersion: v2
+name: esm-do
+description: A Helm chart for esm.do - Living ESM module system for AI agents
+
+type: application
+
+# Chart version - increment on chart changes
+version: 0.1.0
+
+# Application version - matches package.json
+appVersion: "0.0.1"
+
+home: https://esm.do
+sources:
+  - https://github.com/dot-do/esm
+
+keywords:
+  - esm
+  - modules
+  - ai
+  - cloudflare
+  - workers
+  - workerd
+  - typescript
+
+maintainers:
+  - name: dot-do
+    url: https://github.com/dot-do
+
+icon: https://esm.do/favicon.ico
+
+dependencies: []
+
+annotations:
+  category: AI/ML
+  licenses: MIT

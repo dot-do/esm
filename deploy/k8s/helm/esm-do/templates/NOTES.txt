@@ -1,0 +1,144 @@
+================================================================================
+  esm.do - Living ESM Module System for AI Agents
+================================================================================
+
+Thank you for installing {{ .Chart.Name }}!
+
+Chart Version: {{ .Chart.Version }}
+App Version:   {{ .Chart.AppVersion }}
+Release:       {{ .Release.Name }}
+Namespace:     {{ .Release.Namespace }}
+
+--------------------------------------------------------------------------------
+ACCESSING THE APPLICATION
+--------------------------------------------------------------------------------
+
+{{- if .Values.ingress.enabled }}
+
+The application is accessible via Ingress:
+
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+
+{{- else if contains "NodePort" .Values.service.type }}
+
+Get the application URL by running these commands:
+
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "esm-do.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "Application URL: http://$NODE_IP:$NODE_PORT"
+
+{{- else if contains "LoadBalancer" .Values.service.type }}
+
+Get the application URL by running these commands:
+
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+        Watch the status with: kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "esm-do.fullname" . }}
+
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "esm-do.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo "Application URL: http://$SERVICE_IP:{{ .Values.service.port }}"
+
+{{- else if contains "ClusterIP" .Values.service.type }}
+
+The application is running as a ClusterIP service. To access it locally:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "esm-do.fullname" . }} 8787:{{ .Values.service.port }}
+
+  Then open: http://localhost:8787
+
+{{- end }}
+
+--------------------------------------------------------------------------------
+HEALTH CHECKS
+--------------------------------------------------------------------------------
+
+The application exposes health endpoints:
+
+  - Liveness:  /health
+  - Readiness: /health
+
+{{- if .Values.config.metricsEnabled }}
+
+--------------------------------------------------------------------------------
+METRICS
+--------------------------------------------------------------------------------
+
+Metrics are enabled on port {{ .Values.config.metricsPort }}.
+
+To access metrics locally:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "esm-do.fullname" . }} {{ .Values.config.metricsPort }}:{{ .Values.config.metricsPort }}
+  curl http://localhost:{{ .Values.config.metricsPort }}/metrics
+
+{{- end }}
+
+{{- if .Values.autoscaling.enabled }}
+
+--------------------------------------------------------------------------------
+AUTOSCALING
+--------------------------------------------------------------------------------
+
+Horizontal Pod Autoscaler is enabled:
+
+  - Min Replicas: {{ .Values.autoscaling.minReplicas }}
+  - Max Replicas: {{ .Values.autoscaling.maxReplicas }}
+  - Target CPU:   {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%
+  {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+  - Target Memory: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}%
+  {{- end }}
+
+View HPA status:
+  kubectl get hpa --namespace {{ .Release.Namespace }} {{ include "esm-do.fullname" . }}
+
+{{- end }}
+
+--------------------------------------------------------------------------------
+USEFUL COMMANDS
+--------------------------------------------------------------------------------
+
+# View deployment status
+kubectl get deployment --namespace {{ .Release.Namespace }} {{ include "esm-do.fullname" . }}
+
+# View pods
+kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "esm-do.name" . }},app.kubernetes.io/instance={{ .Release.Name }}"
+
+# View logs
+kubectl logs --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "esm-do.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -f
+
+# Describe deployment
+kubectl describe deployment --namespace {{ .Release.Namespace }} {{ include "esm-do.fullname" . }}
+
+# Scale manually (if autoscaling is disabled)
+{{- if not .Values.autoscaling.enabled }}
+kubectl scale deployment --namespace {{ .Release.Namespace }} {{ include "esm-do.fullname" . }} --replicas=3
+{{- end }}
+
+--------------------------------------------------------------------------------
+CONFIGURATION
+--------------------------------------------------------------------------------
+
+Configuration is managed via:
+
+  - ConfigMap: {{ include "esm-do.configMapName" . }}
+  {{- if or .Values.secrets.create .Values.secrets.existingSecret }}
+  - Secret: {{ include "esm-do.secretName" . }}
+  {{- end }}
+
+To update configuration:
+
+  helm upgrade {{ .Release.Name }} {{ .Chart.Name }} --namespace {{ .Release.Namespace }} -f your-values.yaml
+
+--------------------------------------------------------------------------------
+DOCUMENTATION
+--------------------------------------------------------------------------------
+
+For more information, visit:
+
+  - Project:       https://esm.do
+  - Documentation: https://github.com/dot-do/esm
+  - Issues:        https://github.com/dot-do/esm/issues
+
+================================================================================

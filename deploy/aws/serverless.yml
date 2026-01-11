@@ -1,0 +1,295 @@
+# Serverless Framework configuration for esm.do on AWS Lambda
+# https://www.serverless.com/framework/docs
+
+service: esm-do
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  memorySize: 512
+  timeout: 30
+  architecture: arm64
+
+  # Environment variables
+  environment:
+    NODE_ENV: ${self:provider.stage}
+    ESM_STORAGE_TYPE: ${env:ESM_STORAGE_TYPE, 'memory'}
+    ESM_LOG_LEVEL: ${env:ESM_LOG_LEVEL, 'info'}
+    # S3 storage configuration (optional)
+    ESM_S3_BUCKET: ${env:ESM_S3_BUCKET, ''}
+    ESM_S3_PREFIX: ${env:ESM_S3_PREFIX, 'modules/'}
+    # DynamoDB configuration (optional)
+    ESM_DYNAMODB_TABLE: ${env:ESM_DYNAMODB_TABLE, ''}
+
+  # API Gateway HTTP API (v2)
+  httpApi:
+    cors:
+      allowedOrigins:
+        - '*'
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+        - Accept
+        - X-Request-Id
+      allowedMethods:
+        - GET
+        - POST
+        - DELETE
+        - OPTIONS
+      exposedResponseHeaders:
+        - ETag
+        - Cache-Control
+        - X-RateLimit-Limit
+        - X-RateLimit-Remaining
+        - X-RateLimit-Reset
+        - Retry-After
+        - X-Request-Id
+      maxAge: 86400
+
+  # IAM role statements
+  iam:
+    role:
+      statements:
+        # S3 permissions for module storage
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:ListBucket
+          Resource:
+            - arn:aws:s3:::${self:custom.s3Bucket}
+            - arn:aws:s3:::${self:custom.s3Bucket}/*
+        # DynamoDB permissions for metadata
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:UpdateItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:custom.dynamoTable}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:custom.dynamoTable}/index/*
+        # CloudWatch Logs
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource:
+            - arn:aws:logs:${self:provider.region}:*:log-group:/aws/lambda/${self:service}-*
+
+  # Tags for all resources
+  tags:
+    project: esm-do
+    environment: ${self:provider.stage}
+
+# Custom variables
+custom:
+  # S3 bucket for module storage
+  s3Bucket: ${env:ESM_S3_BUCKET, 'esm-do-modules-${self:provider.stage}'}
+  # DynamoDB table for metadata
+  dynamoTable: ${env:ESM_DYNAMODB_TABLE, 'esm-do-metadata-${self:provider.stage}'}
+
+  # Custom domain configuration
+  customDomain:
+    domainName: ${env:ESM_DOMAIN, 'api.esm.do'}
+    basePath: ''
+    stage: ${self:provider.stage}
+    certificateName: ${env:ESM_CERTIFICATE_NAME, '*.esm.do'}
+    createRoute53Record: true
+    createRoute53IPv6Record: true
+    endpointType: regional
+    securityPolicy: tls_1_2
+    apiType: http
+    autoDomain: false
+
+  # ESBuild configuration for bundling
+  esbuild:
+    bundle: true
+    minify: true
+    sourcemap: true
+    exclude:
+      - aws-sdk
+    target: node20
+    platform: node
+    format: esm
+    mainFields:
+      - module
+      - main
+    banner:
+      js: |
+        import { createRequire } from 'module';
+        const require = createRequire(import.meta.url);
+
+# Plugins
+plugins:
+  - serverless-esbuild
+  - serverless-domain-manager
+  - serverless-offline
+
+# Lambda functions
+functions:
+  # Main API handler - catches all routes
+  api:
+    handler: handler.handler
+    description: esm.do ESM module system API
+    events:
+      # Module info and operations
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}
+      - httpApi:
+          method: POST
+          path: /{scope}/{name}
+      - httpApi:
+          method: DELETE
+          path: /{scope}/{name}
+
+      # File extensions
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}.d.ts
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}.mjs
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}.test.js
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}.script.js
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}.bundle.mjs
+
+      # Versioned routes
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}@{version}
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}@{version}.d.ts
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}@{version}.mjs
+
+      # Actions
+      - httpApi:
+          method: POST
+          path: /{scope}/{name}/test
+      - httpApi:
+          method: POST
+          path: /{scope}/{name}/run
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}/diff
+      - httpApi:
+          method: POST
+          path: /{scope}/{name}/revert
+
+      # Dependencies
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}/deps
+      - httpApi:
+          method: GET
+          path: /{scope}/{name}/deps/{action}
+
+      # Scope listing
+      - httpApi:
+          method: GET
+          path: /{scope}/
+
+    # Function-specific settings
+    memorySize: 512
+    timeout: 30
+
+# Optional resources
+resources:
+  # Only create resources if ESM_CREATE_RESOURCES is set
+  Conditions:
+    CreateResources:
+      !Equals ['${env:ESM_CREATE_RESOURCES, 'false'}', 'true']
+
+  Resources:
+    # S3 Bucket for module storage
+    ModuleStorageBucket:
+      Type: AWS::S3::Bucket
+      Condition: CreateResources
+      Properties:
+        BucketName: ${self:custom.s3Bucket}
+        VersioningConfiguration:
+          Status: Enabled
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        Tags:
+          - Key: project
+            Value: esm-do
+          - Key: environment
+            Value: ${self:provider.stage}
+
+    # DynamoDB table for module metadata
+    ModuleMetadataTable:
+      Type: AWS::DynamoDB::Table
+      Condition: CreateResources
+      Properties:
+        TableName: ${self:custom.dynamoTable}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+          - AttributeName: gsi1pk
+            AttributeType: S
+          - AttributeName: gsi1sk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: gsi1
+            KeySchema:
+              - AttributeName: gsi1pk
+                KeyType: HASH
+              - AttributeName: gsi1sk
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+        Tags:
+          - Key: project
+            Value: esm-do
+          - Key: environment
+            Value: ${self:provider.stage}
+
+  Outputs:
+    ApiEndpoint:
+      Description: API Gateway endpoint URL
+      Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    ModuleBucket:
+      Description: S3 bucket for module storage
+      Value: ${self:custom.s3Bucket}
+      Condition: CreateResources
+    MetadataTable:
+      Description: DynamoDB table for metadata
+      Value: ${self:custom.dynamoTable}
+      Condition: CreateResources
