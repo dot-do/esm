@@ -1,0 +1,144 @@
+# =============================================================================
+# esm.do Development Dockerfile
+# Hot reload support with Miniflare for local development
+# =============================================================================
+
+FROM node:20-alpine
+
+# Install development dependencies
+RUN apk add --no-cache \
+    git \
+    python3 \
+    make \
+    g++ \
+    curl \
+    bash
+
+WORKDIR /app
+
+# Copy package files for dependency caching
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY core/package.json ./core/
+
+# Install pnpm and dependencies (including devDependencies for miniflare)
+RUN npm install -g pnpm@9 && \
+    pnpm install
+
+# Copy source files (will be overridden by volume mounts in development)
+COPY tsconfig.json ./
+COPY core/ ./core/
+COPY src/ ./src/
+COPY wrangler.jsonc ./
+COPY vitest.config.ts ./
+
+# Create startup script for development
+RUN cat > /app/dev-entrypoint.sh << 'SCRIPT'
+#!/bin/bash
+set -e
+
+echo "==================================="
+echo "esm.do Development Server"
+echo "==================================="
+echo ""
+
+# Check if node_modules needs rebuilding
+if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; then
+    echo "Installing dependencies..."
+    pnpm install
+fi
+
+# Build TypeScript initially
+echo "Building TypeScript..."
+pnpm run build:core
+pnpm run build:src
+
+# Environment info
+echo ""
+echo "Environment:"
+echo "  - Node.js: $(node --version)"
+echo "  - pnpm: $(pnpm --version)"
+echo "  - Miniflare: $(npx miniflare --version 2>/dev/null || echo 'bundled with wrangler')"
+echo ""
+echo "Starting development server on port 8787..."
+echo "Press Ctrl+C to stop"
+echo ""
+
+# Start wrangler dev with miniflare for local development
+# --local: Use miniflare instead of remote workers
+# --persist: Persist KV/DO data between restarts
+exec npx wrangler dev src/worker/index.ts \
+    --local \
+    --port 8787 \
+    --ip 0.0.0.0 \
+    --persist \
+    --log-level info
+SCRIPT
+
+RUN chmod +x /app/dev-entrypoint.sh
+
+# Create debug script for VS Code remote debugging
+RUN cat > /app/debug-entrypoint.sh << 'SCRIPT'
+#!/bin/bash
+set -e
+
+echo "==================================="
+echo "esm.do Debug Server"
+echo "==================================="
+echo ""
+
+# Build TypeScript
+pnpm run build:core
+pnpm run build:src
+
+echo "Starting debug server with inspector on port 9229..."
+echo "Attach VS Code debugger to localhost:9229"
+echo ""
+
+# Start with Node.js inspector enabled
+exec npx wrangler dev src/worker/index.ts \
+    --local \
+    --port 8787 \
+    --ip 0.0.0.0 \
+    --persist \
+    --inspect \
+    --log-level debug
+SCRIPT
+
+RUN chmod +x /app/debug-entrypoint.sh
+
+# Create test runner script
+RUN cat > /app/test-entrypoint.sh << 'SCRIPT'
+#!/bin/bash
+set -e
+
+echo "==================================="
+echo "esm.do Test Runner"
+echo "==================================="
+echo ""
+
+# Build first
+pnpm run build:core
+pnpm run build:src
+
+# Run tests
+exec pnpm test "$@"
+SCRIPT
+
+RUN chmod +x /app/test-entrypoint.sh
+
+# Expose ports
+# 8787: Worker HTTP server
+# 9229: Node.js inspector for debugging
+EXPOSE 8787 9229
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:8787/ || exit 1
+
+# Default: run development server
+ENTRYPOINT ["/app/dev-entrypoint.sh"]
+
+# Labels for development container
+LABEL org.opencontainers.image.title="esm.do Development"
+LABEL org.opencontainers.image.description="Development environment for esm.do with hot reload"
+LABEL org.opencontainers.image.source="https://github.com/dot-do/esm"
