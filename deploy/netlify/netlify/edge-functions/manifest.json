@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "functions": [
+    {
+      "function": "esm",
+      "name": "esm",
+      "path": "/*",
+      "excludedPath": [
+        "/favicon.ico",
+        "/robots.txt",
+        "/.well-known/*",
+        "/static/*"
+      ],
+      "cache": "manual",
+      "generator": "esm.do@1.0.0"
+    }
+  ],
+  "layers": [],
+  "import_map": "../../import_map.json"
+}
