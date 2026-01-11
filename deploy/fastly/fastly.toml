@@ -1,0 +1,61 @@
+# Fastly Compute@Edge configuration for esm.do
+# ESM module system for AI agents
+
+# Fastly service configuration
+# See: https://developer.fastly.com/reference/compute/fastly-toml/
+
+manifest_version = 3
+service_id = ""  # Set via environment or --service-id flag
+name = "esm-do"
+description = "Living ESM modules for AI agents"
+authors = ["dot-do <dev@esm.do>"]
+language = "javascript"
+
+# Local development settings
+[local_server]
+  # Backend definitions for local testing
+  [local_server.backends]
+    [local_server.backends.origin]
+      url = "http://127.0.0.1:8787"
+
+# Build settings
+[scripts]
+  build = "npm run build"
+
+# Setup configuration for fresh installs
+[setup]
+  # Backends that need to be configured
+  [setup.backends]
+    [setup.backends.origin]
+      description = "Origin server (fallback for cache misses)"
+      address = "esm.do"
+      port = 443
+
+# Environment-specific configuration
+# Production backends - configure in Fastly UI or via API
+[setup.dictionaries]
+  [setup.dictionaries.config]
+    description = "Runtime configuration"
+    items = [
+      { key = "environment", value = "production" },
+      { key = "enable_unsafe_eval", value = "true" },
+      { key = "rate_limit_per_minute", value = "100" }
+    ]
+
+[setup.object_stores]
+  [setup.object_stores.modules]
+    description = "Module storage for esm.do packages"
+
+# KV Store for module caching (Fastly KV)
+[setup.kv_stores]
+  [setup.kv_stores.module_cache]
+    description = "Cache for compiled modules"
+
+# Secret stores for API keys
+[setup.secret_stores]
+  [setup.secret_stores.secrets]
+    description = "API keys and secrets"
+    entries = [
+      { key = "ESM_API_KEY", secret = true },
+      { key = "ESM_AUTH_TOKEN", secret = true }
+    ]
