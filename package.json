@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "esm": "./dist/cli/index.js"
+    "esm": "./bin/esm",
+    "esm.do": "./bin/esm.do.js"
   },
   "exports": {
     ".": {
@@ -19,6 +20,7 @@
     }
   },
   "files": [
+    "bin",
     "dist",
     "LICENSE",
     "README.md"
