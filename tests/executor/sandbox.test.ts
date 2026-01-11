@@ -179,10 +179,7 @@ describe('SandboxExecutor', () => {
       )
     })
 
-    // Note: ai-evaluate uses miniflare/workerd which handles CPU limits differently than Node.js vm.
-    // Infinite loops may not be caught by miniflare's timeout in the same way as the vm module's timeout.
-    // The memory limit test demonstrates that workerd does enforce resource limits (heap exhaustion).
-    it.skip('should enforce timeout on long-running tests', async () => {
+    it('should enforce timeout on long-running tests', async () => {
       const module = `export function slow() { while(true) {} }`
       const tests = `
         describe('slow', () => {
@@ -286,10 +283,7 @@ describe('SandboxExecutor', () => {
       expect(result.error).toContain('Script failed!')
     })
 
-    // Note: ai-evaluate uses miniflare/workerd which handles CPU limits differently than Node.js vm.
-    // Infinite loops may not be caught by miniflare's timeout in the same way as the vm module's timeout.
-    // The memory limit test demonstrates that workerd does enforce resource limits (heap exhaustion).
-    it.skip('should enforce timeout on long-running scripts', async () => {
+    it('should enforce timeout on long-running scripts', async () => {
       const module = `export function loop() { while(true) {} }`
       const script = `loop(); return 'done'`
 
@@ -370,6 +364,38 @@ describe('SandboxExecutor', () => {
     })
   })
 
+  describe('security', () => {
+    it('should block WebSocket global', async () => {
+      const module = `
+        export function checkWebSocket() {
+          return typeof WebSocket
+        }
+      `
+      const script = `return checkWebSocket()`
+
+      const result = await executor.run(module, script)
+
+      // WebSocket should not be defined in the sandbox
+      expect(result.success).toBe(true)
+      expect(result.value).toBe('undefined')
+    })
+
+    it('should throw when attempting to construct WebSocket', async () => {
+      const module = `
+        export function connect() {
+          const ws = new WebSocket('wss://example.com')
+          return ws.readyState
+        }
+      `
+      const script = `return connect()`
+
+      const result = await executor.run(module, script)
+
+      expect(result.success).toBe(false)
+      expect(result.error).toMatch(/WebSocket is not defined|not allowed|blocked/i)
+    })
+  })
+
   describe('V8 isolation', () => {
     it('should run each execution in isolated V8 context', async () => {
       const module = `export function setGlobal(key, val) { globalThis[key] = val }`
@@ -396,17 +422,86 @@ describe('SandboxExecutor', () => {
       expect(({} as Record<string, unknown>).polluted).toBeUndefined()
     })
 
-    // Note: ai-evaluate uses miniflare/workerd which doesn't reliably enforce memory limits
-    // in the test environment. The workerd process itself crashes with OOM rather than returning
-    // an error. This is similar to the timeout behavior - miniflare handles resource limits differently.
-    it.skip('should limit memory usage', async () => {
-      const module = `export function allocate() { const arr = []; while(true) arr.push(new Array(1000000)); }`
-      const script = `allocate()`
+    // RED TEST: Memory limit enforcement
+    // The memoryLimit option is accepted but not yet implemented.
+    // This test verifies that:
+    // 1. A specified memory limit is enforced before system OOM
+    // 2. Allocating memory beyond the limit returns a memory error
+    // 3. The limit works even for moderate allocations (10MB limit)
+    describe('memory limits', () => {
+      it('should enforce memory limit and return error when exceeded', async () => {
+        // Allocate ~20MB which should exceed a 10MB limit but not cause system OOM
+        const module = `
+          export function allocateMemory() {
+            const arrays = []
+            // Allocate ~20MB (20 arrays of 1MB each)
+            for (let i = 0; i < 20; i++) {
+              arrays.push(new Array(1024 * 1024 / 8).fill(0)) // ~1MB per array (8 bytes per number)
+            }
+            return arrays.length
+          }
+        `
+        const script = `return allocateMemory()`
 
-      const result = await executor.run(module, script, undefined, { memoryLimit: 50 * 1024 * 1024 })
+        // Set a 10MB memory limit - should fail before the 20MB allocation completes
+        const result = await executor.run(module, script, undefined, { memoryLimit: 10 * 1024 * 1024 })
 
-      expect(result.success).toBe(false)
-      expect(result.error).toMatch(/memory|heap|limit/i)
+        expect(result.success).toBe(false)
+        expect(result.error).toMatch(/memory|heap|limit/i)
+      })
+
+      it('should allow allocations within the memory limit', async () => {
+        // Allocate ~5MB which should be within a 50MB limit
+        const module = `
+          export function allocateSmall() {
+            const arrays = []
+            // Allocate ~5MB (5 arrays of 1MB each)
+            for (let i = 0; i < 5; i++) {
+              arrays.push(new Array(1024 * 1024 / 8).fill(0))
+            }
+            return arrays.length
+          }
+        `
+        const script = `return allocateSmall()`
+
+        // Set a generous 50MB memory limit - should succeed
+        const result = await executor.run(module, script, undefined, { memoryLimit: 50 * 1024 * 1024 })
+
+        expect(result.success).toBe(true)
+        expect(result.value).toBe(5)
+      })
+
+      it('should respect different memory limits for different executions', async () => {
+        const module = `
+          export function allocate(count) {
+            const arrays = []
+            for (let i = 0; i < count; i++) {
+              arrays.push(new Array(1024 * 1024 / 8).fill(0)) // ~1MB per array
+            }
+            return arrays.length
+          }
+        `
+
+        // First execution: 5MB allocation with 10MB limit - should succeed
+        const result1 = await executor.run(
+          module,
+          `return allocate(5)`,
+          undefined,
+          { memoryLimit: 10 * 1024 * 1024 }
+        )
+        expect(result1.success).toBe(true)
+        expect(result1.value).toBe(5)
+
+        // Second execution: 15MB allocation with 10MB limit - should fail
+        const result2 = await executor.run(
+          module,
+          `return allocate(15)`,
+          undefined,
+          { memoryLimit: 10 * 1024 * 1024 }
+        )
+        expect(result2.success).toBe(false)
+        expect(result2.error).toMatch(/memory|heap|limit/i)
+      })
     })
   })
 })

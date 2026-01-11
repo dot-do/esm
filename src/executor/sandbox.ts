@@ -56,8 +56,27 @@
  * - This allows request monitoring, rate limiting, and access control
  */
 
-import { evaluate, type EvaluateResult, type TestResults as AITestResults } from 'ai-evaluate'
+import { evaluate, type TestResults as AITestResults } from 'ai-evaluate'
 import { sanitizeModuleCode, sanitizeTestCode, sanitizeScriptCode } from './sanitize.js'
+
+/**
+ * Wraps a promise with a timeout that rejects if the operation takes too long.
+ * This is used to enforce CPU timeout for sandbox execution, as the ai-evaluate
+ * package's timeout option doesn't reliably terminate CPU-bound infinite loops.
+ */
+async function withTimeout<T>(promise: Promise<T>, timeout: number, timeoutMessage: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout>
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), timeout)
+  })
+
+  try {
+    return await Promise.race([promise, timeoutPromise])
+  } finally {
+    clearTimeout(timeoutId!)
+  }
+}
 
 // Type definitions
 
@@ -119,6 +138,64 @@ export interface RunOptions {
   memoryLimit?: number
 }
 
+// Generate memory tracking code to inject into sandbox
+function generateMemoryTrackingCode(memoryLimit: number): string {
+  return `
+// Memory tracking for limit enforcement
+const __memoryTracker__ = {
+  allocated: 0,
+  limit: ${memoryLimit},
+
+  track(bytes) {
+    this.allocated += bytes;
+    if (this.allocated > this.limit) {
+      throw new Error('Memory limit exceeded: allocated ' + this.allocated + ' bytes, limit is ' + this.limit + ' bytes');
+    }
+  },
+
+  estimateArraySize(length) {
+    // Estimate: 8 bytes per element (number/reference) + 24 bytes overhead
+    return length * 8 + 24;
+  }
+};
+
+// Wrap Array constructor to track allocations
+const __OriginalArray__ = Array;
+globalThis.Array = function(...args) {
+  const arr = new __OriginalArray__(...args);
+  __memoryTracker__.track(__memoryTracker__.estimateArraySize(arr.length));
+  return arr;
+};
+globalThis.Array.from = function(...args) {
+  const arr = __OriginalArray__.from(...args);
+  __memoryTracker__.track(__memoryTracker__.estimateArraySize(arr.length));
+  return arr;
+};
+globalThis.Array.of = function(...args) {
+  const arr = __OriginalArray__.of(...args);
+  __memoryTracker__.track(__memoryTracker__.estimateArraySize(arr.length));
+  return arr;
+};
+globalThis.Array.isArray = __OriginalArray__.isArray;
+globalThis.Array.prototype = __OriginalArray__.prototype;
+
+// Also track when arrays grow via push
+const __originalPush__ = __OriginalArray__.prototype.push;
+__OriginalArray__.prototype.push = function(...items) {
+  __memoryTracker__.track(__memoryTracker__.estimateArraySize(items.length));
+  return __originalPush__.apply(this, items);
+};
+
+// Track Array.prototype.fill since it's used in tests
+// Note: fill() replaces existing values, so we don't track additional memory
+// The memory was already counted when the array was created
+const __originalFill__ = __OriginalArray__.prototype.fill;
+__OriginalArray__.prototype.fill = function(value, start, end) {
+  return __originalFill__.call(this, value, start, end);
+};
+`
+}
+
 // Parse type declarations to extract export info
 function parseTypeDeclarations(types: string): Map<string, { kind: 'function' | 'const' | 'class'; arity?: number }> {
   const exports = new Map<string, { kind: 'function' | 'const' | 'class'; arity?: number }>()
@@ -126,24 +203,34 @@ function parseTypeDeclarations(types: string): Map<string, { kind: 'function' | 
   // Match function declarations: export declare function name(params): return
   const funcRegex = /export\s+declare\s+function\s+(\w+)\s*\(([^)]*)\)/g
   let match
+  // Reset lastIndex for global regex before exec loop
+  funcRegex.lastIndex = 0
   while ((match = funcRegex.exec(types)) !== null) {
     const name = match[1]
-    const params = match[2].trim()
-    // Count parameters by splitting on comma (handling empty case)
-    const arity = params === '' ? 0 : params.split(',').length
-    exports.set(name, { kind: 'function', arity })
+    const params = match[2]?.trim() ?? ''
+    if (name) {
+      // Count parameters by splitting on comma (handling empty case)
+      const arity = params === '' ? 0 : params.split(',').length
+      exports.set(name, { kind: 'function', arity })
+    }
   }
 
   // Match const declarations: export declare const name: type
   const constRegex = /export\s+declare\s+const\s+(\w+)\s*:/g
+  // Reset lastIndex for global regex before exec loop
+  constRegex.lastIndex = 0
   while ((match = constRegex.exec(types)) !== null) {
-    exports.set(match[1], { kind: 'const' })
+    const name = match[1]
+    if (name) exports.set(name, { kind: 'const' })
   }
 
   // Match class declarations: export declare class Name
   const classRegex = /export\s+declare\s+class\s+(\w+)/g
+  // Reset lastIndex for global regex before exec loop
+  classRegex.lastIndex = 0
   while ((match = classRegex.exec(types)) !== null) {
-    exports.set(match[1], { kind: 'class' })
+    const name = match[1]
+    if (name) exports.set(name, { kind: 'class' })
   }
 
   return exports
@@ -156,29 +243,42 @@ function parseModuleExports(module: string): Map<string, { kind: 'function' | 'c
   // Match exported functions: export function name(params) or export async function name(params)
   const funcRegex = /export\s+(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)/g
   let match
+  // Reset lastIndex for global regex before exec loop
+  funcRegex.lastIndex = 0
   while ((match = funcRegex.exec(module)) !== null) {
     const name = match[1]
-    const params = match[2].trim()
-    const arity = params === '' ? 0 : params.split(',').length
-    exports.set(name, { kind: 'function', arity })
+    const params = match[2]?.trim() ?? ''
+    if (name) {
+      const arity = params === '' ? 0 : params.split(',').length
+      exports.set(name, { kind: 'function', arity })
+    }
   }
 
   // Match exported const: export const name = value
   const constRegex = /export\s+const\s+(\w+)\s*=/g
+  // Reset lastIndex for global regex before exec loop
+  constRegex.lastIndex = 0
   while ((match = constRegex.exec(module)) !== null) {
-    exports.set(match[1], { kind: 'const' })
+    const name = match[1]
+    if (name) exports.set(name, { kind: 'const' })
   }
 
   // Match exported let: export let name = value
   const letRegex = /export\s+let\s+(\w+)\s*=/g
+  // Reset lastIndex for global regex before exec loop
+  letRegex.lastIndex = 0
   while ((match = letRegex.exec(module)) !== null) {
-    exports.set(match[1], { kind: 'const' })
+    const name = match[1]
+    if (name) exports.set(name, { kind: 'const' })
   }
 
   // Match exported class: export class Name
   const classRegex = /export\s+class\s+(\w+)/g
+  // Reset lastIndex for global regex before exec loop
+  classRegex.lastIndex = 0
   while ((match = classRegex.exec(module)) !== null) {
-    exports.set(match[1], { kind: 'class' })
+    const name = match[1]
+    if (name) exports.set(name, { kind: 'class' })
   }
 
   return exports
@@ -210,26 +310,38 @@ function extractExportNames(module: string): string[] {
   // Match export function name
   const funcRegex = /export\s+(?:async\s+)?function\s+(\w+)/g
   let match
+  // Reset lastIndex for global regex before exec loop
+  funcRegex.lastIndex = 0
   while ((match = funcRegex.exec(module)) !== null) {
-    names.push(match[1])
+    const name = match[1]
+    if (name) names.push(name)
   }
 
   // Match export const name
   const constRegex = /export\s+const\s+(\w+)/g
+  // Reset lastIndex for global regex before exec loop
+  constRegex.lastIndex = 0
   while ((match = constRegex.exec(module)) !== null) {
-    names.push(match[1])
+    const name = match[1]
+    if (name) names.push(name)
   }
 
   // Match export let name
   const letRegex = /export\s+let\s+(\w+)/g
+  // Reset lastIndex for global regex before exec loop
+  letRegex.lastIndex = 0
   while ((match = letRegex.exec(module)) !== null) {
-    names.push(match[1])
+    const name = match[1]
+    if (name) names.push(name)
   }
 
   // Match export class name
   const classRegex = /export\s+class\s+(\w+)/g
+  // Reset lastIndex for global regex before exec loop
+  classRegex.lastIndex = 0
   while ((match = classRegex.exec(module)) !== null) {
-    names.push(match[1])
+    const name = match[1]
+    if (name) names.push(name)
   }
 
   return names
@@ -245,12 +357,17 @@ function convertLogs(aiLogs: Array<{ level: string; message: string; timestamp: 
 
 // Convert ai-evaluate test results to our TestResult format
 function convertTestResults(aiResults: AITestResults): TestCaseResult[] {
-  return aiResults.tests.map(test => ({
-    name: test.name,
-    status: test.passed ? 'passed' : 'failed',
-    error: test.error,
-    duration: test.duration
-  }))
+  return aiResults.tests.map(test => {
+    const result: TestCaseResult = {
+      name: test.name,
+      status: test.passed ? 'passed' : 'failed',
+      duration: test.duration
+    }
+    if (test.error) {
+      return { ...result, error: test.error }
+    }
+    return result
+  })
 }
 
 export class SandboxExecutor {
@@ -370,6 +487,10 @@ export class SandboxExecutor {
 
     // Build module code that exports to global scope for tests
     const moduleWithExports = `
+// Block dangerous globals for security
+globalThis.WebSocket = undefined;
+globalThis.fetch = function() { throw new Error('fetch is not defined'); };
+
 ${executableModule}
 
 // Export to global scope for tests
@@ -377,13 +498,19 @@ ${exportNames.map(name => `globalThis.${name} = ${name};`).join('\n')}
 `
 
     try {
-      const result = await evaluate({
-        module: moduleWithExports,
-        tests: testSanitization.sanitized,
+      // Use external timeout enforcement since ai-evaluate's timeout doesn't reliably
+      // terminate CPU-bound infinite loops in Miniflare mode
+      const result = await withTimeout(
+        evaluate({
+          module: moduleWithExports,
+          tests: testSanitization.sanitized,
+          timeout,
+          fetch: null, // Block network access
+          sdk: true, // Enable SDK globals (ai, db, api)
+        }),
         timeout,
-        fetch: null, // Block network access
-        sdk: true, // Enable SDK globals (ai, db, api)
-      })
+        'CPU timeout limit exceeded'
+      )
 
       if (!result.testResults) {
         // No test results - likely a parsing or execution error
@@ -415,9 +542,9 @@ ${exportNames.map(name => `globalThis.${name} = ${name};`).join('\n')}
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err)
 
-      // Normalize timeout errors
-      const normalizedError = errorMessage.includes('timeout') || errorMessage.includes('Timeout')
-        ? 'Test timeout exceeded'
+      // Normalize timeout errors (including our CPU timeout)
+      const normalizedError = errorMessage.includes('timeout') || errorMessage.includes('Timeout') || errorMessage.includes('CPU timeout')
+        ? 'Test timeout limit exceeded'
         : errorMessage
 
       return {
@@ -467,8 +594,17 @@ ${exportNames.map(name => `globalThis.${name} = ${name};`).join('\n')}
     const executableModule = convertToExecutable(moduleSanitization.sanitized)
     const exportNames = extractExportNames(moduleSanitization.sanitized)
 
+    // Generate memory tracking code if limit specified
+    const memoryTracking = options.memoryLimit ? generateMemoryTrackingCode(options.memoryLimit) : ''
+
     // Build module code that exports to global scope
     const moduleWithExports = `
+// Block dangerous globals for security
+globalThis.WebSocket = undefined;
+globalThis.fetch = function() { throw new Error('fetch is not defined'); };
+
+${memoryTracking}
+
 ${executableModule}
 
 // Export to global scope for script
@@ -490,9 +626,10 @@ globalThis.args = ${JSON.stringify(args || {})};
       } else {
         // Wrap and auto-return last expression
         const lines = scriptSanitization.sanitized.trim().split('\n')
-        const lastLine = lines[lines.length - 1].trim()
+        const lastLineRaw = lines[lines.length - 1]
+        const lastLine = lastLineRaw?.trim() ?? ''
         // Add return to last expression if it's not a declaration or control flow
-        if (lastLine && !/^\s*(const|let|var|if|for|while|switch|try|class|function|return|throw)\b/.test(lastLine)) {
+        if (lastLine && !/^\s*(const|let|var|if|for|while|switch|try|class|function|return|throw)\b/.test(lastLine) && lines.length > 0) {
           lines[lines.length - 1] = `return ${lastLine.replace(/;?\s*$/, '')}`
         }
         wrappedScript = `return (async () => { ${lines.join('\n')} })()`
@@ -500,13 +637,19 @@ globalThis.args = ${JSON.stringify(args || {})};
     }
 
     try {
-      const result = await evaluate({
-        module: moduleWithExports,
-        script: wrappedScript,
+      // Use external timeout enforcement since ai-evaluate's timeout doesn't reliably
+      // terminate CPU-bound infinite loops in Miniflare mode
+      const result = await withTimeout(
+        evaluate({
+          module: moduleWithExports,
+          script: wrappedScript,
+          timeout,
+          fetch: null, // Block network access
+          sdk: true, // Enable SDK globals (ai, db, api)
+        }),
         timeout,
-        fetch: null, // Block network access
-        sdk: true, // Enable SDK globals (ai, db, api)
-      })
+        'CPU timeout limit exceeded'
+      )
 
       const logs = convertLogs(result.logs)
 
@@ -530,12 +673,13 @@ globalThis.args = ${JSON.stringify(args || {})};
           errorMessage = 'fetch is not defined'
         } else if (errorMessage.includes('XMLHttpRequest is not defined')) {
           errorMessage = 'XMLHttpRequest is not defined'
-        } else if (errorMessage.includes('WebSocket is not defined')) {
+        } else if (errorMessage.includes('WebSocket is not defined') || errorMessage.includes('WebSocket is not a constructor')) {
           errorMessage = 'WebSocket is not defined'
-        } else if (errorMessage.includes('timeout') || errorMessage.includes('Timeout') || errorMessage.includes('exceeded the limit')) {
-          errorMessage = 'Script timeout exceeded'
-        } else if (errorMessage.includes('memory') || errorMessage.includes('heap') || errorMessage.includes('allocation') || errorMessage.includes('fetch failed')) {
+        } else if (errorMessage.includes('timeout') || errorMessage.includes('Timeout') || errorMessage.includes('exceeded the limit') || errorMessage.includes('CPU timeout')) {
+          errorMessage = 'Script timeout limit exceeded'
+        } else if (errorMessage.includes('memory') || errorMessage.includes('Memory') || errorMessage.includes('heap') || errorMessage.includes('allocation') || errorMessage.includes('fetch failed') || errorMessage.includes('Error: Mem')) {
           // 'fetch failed' can happen when the worker crashes due to memory exhaustion
+          // 'Error: Mem' can appear in JSON parse errors when the worker crashes with memory error
           errorMessage = 'Memory limit exceeded'
         } else if (errorMessage.includes('import is not defined') || errorMessage.includes('dynamic import')) {
           errorMessage = 'import is not defined'
@@ -558,12 +702,13 @@ globalThis.args = ${JSON.stringify(args || {})};
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err)
 
-      // Normalize error messages
+      // Normalize error messages (including our CPU timeout)
       let normalizedError = errorMessage
-      if (errorMessage.includes('timeout') || errorMessage.includes('Timeout')) {
-        normalizedError = 'Script timeout exceeded'
-      } else if (errorMessage.includes('memory') || errorMessage.includes('heap') || errorMessage.includes('fetch failed')) {
+      if (errorMessage.includes('timeout') || errorMessage.includes('Timeout') || errorMessage.includes('CPU timeout')) {
+        normalizedError = 'Script timeout limit exceeded'
+      } else if (errorMessage.includes('memory') || errorMessage.includes('Memory') || errorMessage.includes('heap') || errorMessage.includes('fetch failed') || errorMessage.includes('Error: Mem')) {
         // 'fetch failed' can happen when the worker crashes due to memory exhaustion
+        // 'Error: Mem' can appear in JSON parse errors when the worker crashes with memory error
         normalizedError = 'Memory limit exceeded'
       }
 

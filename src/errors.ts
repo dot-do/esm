@@ -28,11 +28,11 @@ export class ValidationError extends ESMError {
 }
 
 export class ExecutionError extends ESMError {
-  originalError?: Error;
+  originalError: Error | undefined;
   constructor(message: string, originalError?: Error) {
     super(message, 'EXECUTION_ERROR');
     this.name = 'ExecutionError';
-    this.originalError = originalError;
+    this.originalError = originalError ?? undefined;
   }
 }
 

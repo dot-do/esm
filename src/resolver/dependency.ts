@@ -102,7 +102,6 @@ const EXPORT_FUNC_REGEX = /export\s+(?:async\s+)?function\s+(\w+)/g
 const EXPORT_CONST_REGEX = /export\s+const\s+(\w+)/g
 const EXPORT_LET_REGEX = /export\s+let\s+(\w+)/g
 const EXPORT_CLASS_REGEX = /export\s+class\s+(\w+)/g
-const STRIP_IMPORTS_REGEX = /import\s+(?:(\w+)\s*,?\s*)?(?:\*\s+as\s+(\w+)|{([^}]+)})?\s*from\s*['"]esm\.do\/[^'"]+['"]\s*;?/g
 
 // Quick check pattern (non-capturing for speed)
 const HAS_ESM_IMPORT = /import[^]*esm\.do\/@/
@@ -191,31 +190,37 @@ export class DependencyResolver {
     while ((match = IMPORT_REGEX.exec(source)) !== null) {
       const [statement, defaultImport, namespaceImport, namedImportsStr, moduleName] = match
 
+      // Skip if we don't have both required values
+      if (!statement || !moduleName) continue
+
       const namedImports: string[] = []
       if (namedImportsStr) {
         // Parse named imports, handling aliases
         const parts = namedImportsStr.split(',')
         for (let i = 0; i < parts.length; i++) {
-          const part = parts[i].trim()
+          const partRaw = parts[i]
+          const part = partRaw?.trim()
           if (!part) continue
           // Handle "name as alias" pattern - we want the original name
           const asMatch = ALIAS_REGEX.exec(part)
-          if (asMatch) {
-            namedImports.push(asMatch[1])
+          const matchedName = asMatch?.[1]
+          if (matchedName) {
+            namedImports.push(matchedName)
           } else {
             namedImports.push(part)
           }
         }
       }
 
-      imports.push({
+      const importEntry: ParsedImport = {
         statement,
         specifier: `esm.do/${moduleName}`,
         moduleName,
         namedImports,
-        defaultImport: defaultImport || undefined,
-        namespaceImport: namespaceImport || undefined,
-      })
+      }
+      if (defaultImport) importEntry.defaultImport = defaultImport
+      if (namespaceImport) importEntry.namespaceImport = namespaceImport
+      imports.push(importEntry)
     }
 
     // Cache the result
@@ -248,7 +253,8 @@ export class DependencyResolver {
     const pending = new Set<string>() // Track in-flight fetches
 
     while (queue.length > 0) {
-      const current = queue.shift()!
+      const current = queue.shift()
+      if (current === undefined) break
 
       if (visited.has(current.name)) {
         continue
@@ -338,7 +344,9 @@ export class DependencyResolver {
             let current = node
             while (current !== dep) {
               cycle.unshift(current)
-              current = parent.get(current)!
+              const next = parent.get(current)
+              if (next === undefined) break // Broken parent chain, exit safely
+              current = next
             }
             cycle.unshift(dep)
             return cycle
@@ -513,19 +521,6 @@ ${entrySource}
   }
 
   /**
-   * Strip import statements from source
-   */
-  private stripImports(source: string): string {
-    // Early return if no esm.do imports
-    if (!HAS_ESM_IMPORT.test(source)) {
-      return source
-    }
-    // Reset regex lastIndex and remove esm.do import statements
-    STRIP_IMPORTS_REGEX.lastIndex = 0
-    return source.replace(STRIP_IMPORTS_REGEX, '')
-  }
-
-  /**
    * Convert module name to safe JavaScript identifier
    * Results are cached for repeated lookups
    */
@@ -570,22 +565,26 @@ ${entrySource}
     // Match export function name
     let match
     while ((match = EXPORT_FUNC_REGEX.exec(source)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name) names.push(name)
     }
 
     // Match export const name
     while ((match = EXPORT_CONST_REGEX.exec(source)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name) names.push(name)
     }
 
     // Match export let name
     while ((match = EXPORT_LET_REGEX.exec(source)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name) names.push(name)
     }
 
     // Match export class name
     while ((match = EXPORT_CLASS_REGEX.exec(source)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name) names.push(name)
     }
 
     // Cache the result

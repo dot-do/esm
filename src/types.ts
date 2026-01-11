@@ -5,6 +5,42 @@
  */
 
 // =============================================================================
+// Logger Interface
+// =============================================================================
+
+/**
+ * Logger interface for structured logging throughout the ESM system
+ *
+ * This interface provides a consistent logging API that can be implemented
+ * by different logging backends (console, file, external services, etc.).
+ *
+ * @interface Logger
+ * @property {function} debug - Log debug-level messages
+ * @property {function} info - Log informational messages
+ * @property {function} warn - Log warning messages
+ * @property {function} error - Log error messages with optional error object
+ */
+export interface Logger {
+  debug(message: string, context?: Record<string, unknown>): void
+  info(message: string, context?: Record<string, unknown>): void
+  warn(message: string, context?: Record<string, unknown>): void
+  error(message: string, error?: Error, context?: Record<string, unknown>): void
+}
+
+/**
+ * Default console logger implementation
+ *
+ * A simple logger that outputs to the console. Suitable for development
+ * and basic production use cases.
+ */
+export const consoleLogger: Logger = {
+  debug: (msg, ctx) => console.debug(msg, ctx),
+  info: (msg, ctx) => console.info(msg, ctx),
+  warn: (msg, ctx) => console.warn(msg, ctx),
+  error: (msg, err, ctx) => console.error(msg, err, ctx)
+}
+
+// =============================================================================
 // Core Interfaces
 // =============================================================================
 
@@ -73,12 +109,12 @@ export interface ESMModule {
  * };
  */
 export interface ESMWriteOptions {
-  name: string
-  types: string
-  module: string
-  tests?: string
-  script?: string
-  version?: string
+  readonly name: string
+  readonly types: string
+  readonly module: string
+  readonly tests?: string | undefined
+  readonly script?: string | undefined
+  readonly version?: string | undefined
 }
 
 /**
@@ -167,40 +203,41 @@ export interface ESMRunResult {
  * };
  */
 export interface TestCaseResult {
-  name: string
-  passed: boolean
-  duration: number
-  error?: string
+  readonly name: string
+  readonly passed: boolean
+  readonly duration: number
+  readonly error?: string | undefined
 }
 
 /**
  * ESMTestResult - Result from running a module's tests
  */
 export interface ESMTestResult {
-  passed: number
-  failed: number
-  total: number
-  results: TestCaseResult[]
-  failures?: Array<{ name: string; error: string }>
-  duration: number
+  readonly passed: number
+  readonly failed: number
+  readonly total: number
+  readonly results: readonly TestCaseResult[]
+  readonly failures?: ReadonlyArray<{ readonly name: string; readonly error: string }> | undefined
+  readonly duration: number
 }
 
 /**
  * ModuleVersion - Version history entry
  */
 export interface ModuleVersion {
-  version: string
-  message: string
-  timestamp: Date
+  readonly version: string
+  readonly message: string
+  readonly timestamp: Date
+  readonly parent?: string | undefined
 }
 
 /**
  * ValidationResult - Result from validating a module
  */
 export interface ValidationResult {
-  valid: boolean
-  errors: string[]
-  warnings: string[]
+  readonly valid: boolean
+  readonly errors: readonly string[]
+  readonly warnings: readonly string[]
 }
 
 // =============================================================================
@@ -349,8 +386,16 @@ export function isValidationResult(value: unknown): value is ValidationResult {
 /**
  * Generate a unique version identifier
  */
-function generateVersion(): string {
-  return Date.now().toString(36) + Math.random().toString(36).substring(2, 8)
+export function generateVersion(): string {
+  const timestamp = Date.now().toString(36)
+  // Use crypto for better randomness
+  const randomBytes = new Uint8Array(8)
+  crypto.getRandomValues(randomBytes)
+  const random = Array.from(randomBytes)
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 12)
+  return `${timestamp}-${random}`
 }
 
 /**
@@ -363,7 +408,7 @@ export function createESMModule(options: {
   module: string
   tests: string
   script: string
-  version?: string
+  version?: string | undefined
 }): ESMModule {
   const now = new Date()
   return {
@@ -385,8 +430,8 @@ export function createESMWriteOptions(options: {
   name: string
   types: string
   module: string
-  tests?: string
-  script?: string
+  tests?: string | undefined
+  script?: string | undefined
 }): ESMWriteOptions {
   return {
     name: options.name,
@@ -421,8 +466,8 @@ export function createESMTestResult(results: TestCaseResult[], duration = 0): ES
  */
 export function createESMRunResult(options: {
   value: unknown
-  logs?: string[]
-  errors?: string[]
+  logs?: string[] | undefined
+  errors?: string[] | undefined
 }): ESMRunResult {
   return {
     value: options.value,
@@ -448,42 +493,46 @@ export type WriteOptions = ESMWriteOptions
  * Simplified version of ESMReadResult with optional tests/script.
  */
 export interface ReadResult {
-  name: string
-  types: string
-  module: string
-  tests?: string
-  script?: string
-  version: string
+  readonly name: string
+  readonly types: string
+  readonly module: string
+  readonly tests?: string | undefined
+  readonly script?: string | undefined
+  readonly version: string
 }
 
 /**
  * RunResult - Result of running a module's script
  */
 export interface RunResult {
-  value: unknown
-  logs: string[] | string
-  errors: string[]
-  exitCode: number
+  readonly value: unknown
+  readonly logs: readonly string[] | string
+  readonly errors: readonly string[]
+  readonly exitCode: number
 }
 
 /**
  * RunOptions - Options for running a module (CLI-aligned signature)
  */
 export interface RunOptions {
-  name: string
-  args?: Record<string, unknown>
-  timeout?: number
-  env?: Record<string, string>
+  readonly name: string
+  readonly args?: Readonly<Record<string, unknown>> | undefined
+  readonly timeout?: number | undefined
+  readonly env?: Readonly<Record<string, string>> | undefined
+  /** Optional inline module code - if provided, runs without storage lookup */
+  readonly module?: string | undefined
+  /** Optional inline script - if provided with module, runs this script */
+  readonly script?: string | undefined
 }
 
 /**
  * TestOptions - Options for testing a module (CLI-aligned signature)
  */
 export interface TestOptions {
-  name: string
-  watch?: boolean
-  coverage?: boolean
-  filter?: string
+  readonly name: string
+  readonly watch?: boolean | undefined
+  readonly coverage?: boolean | undefined
+  readonly filter?: string | undefined
 }
 
 /**
@@ -504,37 +553,37 @@ export type TestResult = ESMTestResult
  * DeleteResult - Result of deleting a module
  */
 export interface DeleteResult {
-  deleted: boolean
-  name: string
+  readonly deleted: boolean
+  readonly name: string
 }
 
 /**
  * WriteResult - Result of writing a module
  */
 export interface WriteResult {
-  name: string
-  version: string
-  testResults?: TestResult
-  value?: unknown
+  readonly name: string
+  readonly version: string
+  readonly testResults?: TestResult | undefined
+  readonly value?: unknown
 }
 
 /**
  * FileChange - Change information for a single file in a diff
  */
 export interface FileChange {
-  file: string
-  additions: number
-  deletions: number
+  readonly file: string
+  readonly additions: number
+  readonly deletions: number
 }
 
 /**
  * DiffResult - Result of comparing two versions of a module
  */
 export interface DiffResult {
-  from: string
-  to: string
-  changes: FileChange[]
-  patch: string
+  readonly from: string
+  readonly to: string
+  readonly changes: readonly FileChange[]
+  readonly patch: string
 }
 
 // =============================================================================
@@ -548,7 +597,7 @@ export interface Storage {
   read(name: string): Promise<ESMReadResult | null>
   write(options: ESMWriteOptions): Promise<ESMModule>
   delete(name: string): Promise<boolean>
-  list(pattern?: string): Promise<string[]>
+  list(pattern?: string | undefined): Promise<string[]>
   versions(name: string): Promise<ModuleVersion[]>
 }
 

@@ -1,0 +1,17 @@
+{
+  "name": "@dotdo/esm",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./types": "./dist/types.js",
+    "./errors": "./dist/errors.js",
+    "./executor": "./dist/executor/index.js",
+    "./storage": "./dist/storage/index.js"
+  },
+  "dependencies": {
+    "ai-evaluate": "^2.0.2"
+  }
+}

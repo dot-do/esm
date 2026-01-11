@@ -36,13 +36,13 @@ const MODULE_NAME_PATTERN = /^@[a-zA-Z0-9-]+\/[a-zA-Z0-9-]+(?:\/[a-zA-Z0-9-]+)*$
  */
 export class GitxStorageError extends Error {
   public readonly code: string
-  public readonly context?: Record<string, unknown>
+  public readonly context: Record<string, unknown> | undefined
 
   constructor(message: string, code: string, context?: Record<string, unknown>) {
     super(message)
     this.name = 'GitxStorageError'
     this.code = code
-    this.context = context
+    this.context = context ?? undefined
     Object.setPrototypeOf(this, GitxStorageError.prototype)
   }
 }
@@ -185,7 +185,7 @@ function validateModuleName(name: string): void {
 function validateModuleContent(module: StoredModule): void {
   if (!module || typeof module !== 'object') {
     throw new InvalidModuleContentError(
-      module?.name || 'unknown',
+      (module as StoredModule | null)?.name || 'unknown',
       'Module must be an object'
     )
   }
@@ -284,11 +284,21 @@ export class GitxStorage implements ModuleStorage {
 
       // Read all blob contents in parallel
       this.trace('debug', 'read: reading blobs', { name })
+      const typesHash = tree['index.d.ts']
+      const moduleHash = tree['index.mjs']
+      const testsHash = tree['index.test.js']
+      const scriptHash = tree['index.script.js']
+      if (!typesHash || !moduleHash || !testsHash || !scriptHash) {
+        throw new InvalidModuleContentError(
+          name,
+          'Missing required file hashes in tree'
+        )
+      }
       const [types, module, tests, script] = await Promise.all([
-        this.client.readBlob(tree['index.d.ts']),
-        this.client.readBlob(tree['index.mjs']),
-        this.client.readBlob(tree['index.test.js']),
-        this.client.readBlob(tree['index.script.js']),
+        this.client.readBlob(typesHash),
+        this.client.readBlob(moduleHash),
+        this.client.readBlob(testsHash),
+        this.client.readBlob(scriptHash),
       ])
 
       const result: StoredModule = {
@@ -529,12 +539,15 @@ export class GitxStorage implements ModuleStorage {
       this.trace('debug', 'versions: fetching history', { name, headHash })
       const history = await this.client.log(headHash, limit)
 
-      const result: ModuleVersion[] = history.map((commit) => ({
-        hash: commit.hash,
-        message: commit.message,
-        timestamp: commit.timestamp,
-        parent: commit.parent,
-      }))
+      const result: ModuleVersion[] = history.map((commit) => {
+        const entry: ModuleVersion = {
+          version: commit.hash,
+          message: commit.message,
+          timestamp: new Date(commit.timestamp),
+        }
+        if (commit.parent) entry.parent = commit.parent
+        return entry
+      })
 
       this.trace('info', 'versions: completed successfully', {
         name,

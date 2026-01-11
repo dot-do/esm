@@ -2,318 +2,109 @@
  * esm.do Cloudflare Worker API
  *
  * This worker handles all HTTP routes for the esm.do module system.
- * Routes:
- * - GET /:name - get module info
- * - GET /:name.d.ts - get types file
- * - GET /:name.mjs - get module file
- * - GET /:name.test.js - get tests file
- * - GET /:name.script.js - get script file
- * - GET /:name@:version - get specific version
- * - POST /:name - create/update module
- * - POST /:name/test - run tests
- * - POST /:name/run - execute script
- * - DELETE /:name - delete module
+ *
+ * ARCHITECTURE OVERVIEW
+ * =====================
+ *
+ * The esm.do worker is a Cloudflare Workers application that provides a complete
+ * module hosting and execution platform. It combines several architectural layers:
+ *
+ * 1. HTTP Router Layer
+ *    - Handles all incoming requests and routes to appropriate handlers
+ *    - Supports CORS, rate limiting, and request validation
+ *    - Content negotiation (JSON, TypeScript, JavaScript, HTML)
+ *
+ * 2. Storage Layer (GitxStorage) - imported from ./storage.ts
+ *    - Git-like content-addressed storage for modules
+ *    - Blobs, trees, commits, refs, and tags
+ *    - Version history and SHA-based versioning
+ *    - InMemoryGitxClient and WorkerGitxStorage implementations
+ *
+ * 3. Execution Layer (Worker Sandbox)
+ *    - Test runner with describe/it/expect pattern
+ *    - Script executor with console capture
+ *    - Uses unsafe_eval binding for dynamic code execution in workerd
+ *    - Sandboxed environment blocking dangerous globals (process, require, etc.)
+ *
+ * REQUEST FLOW
+ * ============
+ *
+ * 1. Request arrives at fetch() handler
+ * 2. Rate limiting check (per-IP, 100 req/min)
+ * 3. Path parsing to extract scope, name, version, extension, action
+ * 4. Route to appropriate handler based on method and path
+ * 5. Handler interacts with GitxStorage for data
+ * 6. Handler may invoke sandbox execution for /test or /run endpoints
+ * 7. Response with CORS headers and rate limit headers
+ *
+ * ROUTES
+ * ======
+ *
+ * GET Routes (Read operations):
+ * - GET /:scope/:name              - Module info (JSON metadata)
+ * - GET /:scope/:name.d.ts         - TypeScript declaration file
+ * - GET /:scope/:name.mjs          - ESM module (JavaScript)
+ * - GET /:scope/:name.test.js      - Test file (JavaScript)
+ * - GET /:scope/:name.script.js    - Script file (JavaScript)
+ * - GET /:scope/:name.bundle.mjs   - Bundled module with dependencies
+ * - GET /:scope/:name@:version     - Specific version (SHA or tag)
+ * - GET /:scope/:name@:version.ext - Specific version with extension
+ * - GET /:scope/:name/diff         - Diff between versions (?from=SHA&to=SHA)
+ * - GET /:scope/                   - List modules in scope
+ *
+ * POST Routes (Write/Execute operations):
+ * - POST /:scope/:name             - Create or update module
+ * - POST /:scope/:name/test        - Run module tests
+ * - POST /:scope/:name/run         - Execute module script
+ * - POST /:scope/:name/revert      - Revert to previous version
+ *
+ * DELETE Routes:
+ * - DELETE /:scope/:name           - Delete module
+ *
+ * ENVIRONMENT BINDINGS
+ * ====================
+ *
+ * The worker requires the following Cloudflare Workers bindings:
+ *
+ * - unsafe_eval: Required for dynamic code execution in tests and scripts.
+ *   Provides eval() and newFunction() in the workerd environment where
+ *   standard eval() and new Function() are blocked by default.
+ *
+ * SECURITY CONSIDERATIONS
+ * =======================
+ *
+ * 1. Sandbox Isolation:
+ *    - Scripts run with blocked globals (process, require, __dirname, etc.)
+ *    - No file system access, no network fetch in sandbox
+ *    - Timeout enforcement for long-running code
+ *
+ * 2. Authentication:
+ *    - Protected namespaces (e.g., @protected/*) require Authorization header
+ *    - Delete operations on protected namespaces require auth
+ *
+ * 3. Input Validation:
+ *    - Module name validation (alphanumeric, underscore, hyphen)
+ *    - TypeScript syntax validation for types
+ *    - Payload size limits (10MB)
+ *
+ * 4. Rate Limiting:
+ *    - 100 requests per minute per IP
+ *    - 429 response when limit exceeded
  *
  * Related issues:
  * - esm-hgk: API route handlers
  * - esm-bhs: Worker implementation
+ * - esm-arch.18: Worker documentation (this documentation)
  */
 
-import type { StoredModule, ModuleVersion, GitxClient, WriteResult, ModuleStorage } from '../storage/types.js'
-
-// =============================================================================
-// In-Memory GitxClient Implementation for Cloudflare Workers
-// =============================================================================
-// This implements the GitxClient interface using in-memory storage for the
-// Cloudflare Workers runtime. It provides git-like content-addressed storage
-// with blobs, trees, commits, refs, and tags - all stored in Maps.
-//
-// Note: This is a stateless implementation - data persists only for the
-// lifetime of the worker instance. For durable storage, connect to the
-// actual gitx.do backend service.
-// =============================================================================
-
-function generateSha(content: string): string {
-  // Generate a short SHA-like hash for content addressing
-  let hash = 0
-  for (let i = 0; i < content.length; i++) {
-    const char = content.charCodeAt(i)
-    hash = ((hash << 5) - hash) + char
-    hash = hash & hash
-  }
-  // Return 7-char hex string like git short SHA
-  const hex = Math.abs(hash).toString(16).padStart(7, '0').slice(0, 7)
-  return hex + Math.random().toString(16).slice(2, 9) // Add randomness for uniqueness
-}
-
-class InMemoryGitxClient implements GitxClient {
-  private blobs = new Map<string, string>()
-  private trees = new Map<string, Record<string, string>>()
-  private commits = new Map<string, { tree: string; parent?: string; message: string; timestamp: number }>()
-  private refs = new Map<string, string>()
-  // Tag storage: module name -> tag name -> commit SHA
-  private tags = new Map<string, Map<string, string>>()
-
-  async writeBlob(content: string): Promise<string> {
-    const hash = generateSha(content + Date.now())
-    this.blobs.set(hash, content)
-    return hash
-  }
-
-  async readBlob(hash: string): Promise<string> {
-    if (!this.blobs.has(hash)) {
-      throw new Error(`Blob ${hash} not found`)
-    }
-    return this.blobs.get(hash)!
-  }
-
-  async writeTree(entries: Record<string, string>): Promise<string> {
-    const hash = generateSha(JSON.stringify(entries) + Date.now())
-    this.trees.set(hash, entries)
-    return hash
-  }
-
-  async readTree(hash: string): Promise<Record<string, string>> {
-    const tree = this.trees.get(hash)
-    if (!tree) throw new Error(`Tree ${hash} not found`)
-    return tree
-  }
-
-  async commit(treeHash: string, message: string, parent?: string): Promise<string> {
-    const timestamp = Date.now()
-    const hash = generateSha(treeHash + message + timestamp)
-    this.commits.set(hash, { tree: treeHash, parent, message, timestamp })
-    return hash
-  }
-
-  async getCommit(hash: string): Promise<{ tree: string; parent?: string; message: string; timestamp: number }> {
-    const commit = this.commits.get(hash)
-    if (!commit) throw new Error(`Commit ${hash} not found`)
-    return commit
-  }
-
-  async updateRef(ref: string, commitHash: string): Promise<void> {
-    this.refs.set(ref, commitHash)
-  }
-
-  async getRef(ref: string): Promise<string | null> {
-    return this.refs.get(ref) || null
-  }
-
-  async listRefs(prefix?: string): Promise<Record<string, string>> {
-    const result: Record<string, string> = {}
-    for (const [ref, hash] of this.refs) {
-      if (!prefix || ref.startsWith(prefix)) {
-        result[ref] = hash
-      }
-    }
-    return result
-  }
-
-  async deleteRef(ref: string): Promise<void> {
-    this.refs.delete(ref)
-  }
-
-  async log(startCommit: string, limit?: number): Promise<Array<{
-    hash: string
-    tree: string
-    parent?: string
-    message: string
-    timestamp: number
-  }>> {
-    const history: Array<{
-      hash: string
-      tree: string
-      parent?: string
-      message: string
-      timestamp: number
-    }> = []
-
-    let currentHash: string | undefined = startCommit
-    const maxItems = limit || 100
-
-    while (currentHash && history.length < maxItems) {
-      const commit = this.commits.get(currentHash)
-      if (!commit) break
-      history.push({
-        hash: currentHash,
-        tree: commit.tree,
-        parent: commit.parent,
-        message: commit.message,
-        timestamp: commit.timestamp,
-      })
-      currentHash = commit.parent
-    }
-
-    return history
-  }
-
-  // Tag operations
-  createTag(moduleName: string, tagName: string, commitSha: string): void {
-    if (!this.tags.has(moduleName)) {
-      this.tags.set(moduleName, new Map())
-    }
-    this.tags.get(moduleName)!.set(tagName, commitSha)
-  }
-
-  getTaggedCommit(moduleName: string, tagName: string): string | null {
-    return this.tags.get(moduleName)?.get(tagName) || null
-  }
-}
-
-// =============================================================================
-// GitxStorage Implementation for Worker
-// =============================================================================
-
-function moduleToRef(name: string): string {
-  return `refs/modules/${name}`
-}
-
-function refToModule(ref: string): string {
-  return ref.replace('refs/modules/', '')
-}
-
-class WorkerGitxStorage implements ModuleStorage {
-  private client: InMemoryGitxClient
-
-  constructor(client: InMemoryGitxClient) {
-    this.client = client
-  }
-
-  async read(name: string, version?: string): Promise<StoredModule | null> {
-    let commitHash: string
-    let displayVersion: string | undefined
-
-    if (version) {
-      // Check if version is a tag (starts with 'v')
-      if (version.startsWith('v')) {
-        const taggedCommit = this.client.getTaggedCommit(name, version)
-        if (taggedCommit) {
-          commitHash = taggedCommit
-          displayVersion = version // Use tag name as display version
-        } else {
-          // Try as a SHA
-          commitHash = version
-        }
-      } else {
-        commitHash = version
-      }
-    } else {
-      const ref = moduleToRef(name)
-      const latestHash = await this.client.getRef(ref)
-      if (!latestHash) return null
-      commitHash = latestHash
-    }
-
-    try {
-      const commit = await this.client.getCommit(commitHash)
-      const tree = await this.client.readTree(commit.tree)
-
-      const [types, module, tests, script] = await Promise.all([
-        this.client.readBlob(tree['index.d.ts']),
-        this.client.readBlob(tree['index.mjs']),
-        this.client.readBlob(tree['index.test.js']),
-        this.client.readBlob(tree['index.script.js']),
-      ])
-
-      return {
-        name,
-        types,
-        module,
-        tests,
-        script,
-        version: displayVersion || commitHash, // Use tag name if available
-      }
-    } catch {
-      return null
-    }
-  }
-
-  async write(name: string, data: StoredModule): Promise<WriteResult> {
-    const [typesHash, moduleHash, testsHash, scriptHash] = await Promise.all([
-      this.client.writeBlob(data.types),
-      this.client.writeBlob(data.module),
-      this.client.writeBlob(data.tests),
-      this.client.writeBlob(data.script),
-    ])
-
-    const treeHash = await this.client.writeTree({
-      'index.d.ts': typesHash,
-      'index.mjs': moduleHash,
-      'index.test.js': testsHash,
-      'index.script.js': scriptHash,
-    })
-
-    const ref = moduleToRef(name)
-    const parentHash = await this.client.getRef(ref)
-    const message = parentHash ? `Update ${name}` : `Create ${name}`
-    const commitHash = await this.client.commit(treeHash, message, parentHash ?? undefined)
-    await this.client.updateRef(ref, commitHash)
-
-    return { version: commitHash, name }
-  }
-
-  async delete(name: string): Promise<void> {
-    const ref = moduleToRef(name)
-    await this.client.deleteRef(ref)
-  }
-
-  async list(pattern?: string): Promise<string[]> {
-    const refs = await this.client.listRefs('refs/modules/')
-    const names = Object.keys(refs).map(refToModule)
-    if (pattern) {
-      return names.filter(n => n.includes(pattern.replace(/\*/g, '')))
-    }
-    return names.sort()
-  }
-
-  async versions(name: string, limit?: number): Promise<ModuleVersion[]> {
-    const ref = moduleToRef(name)
-    const headHash = await this.client.getRef(ref)
-    if (!headHash) return []
-
-    const history = await this.client.log(headHash, limit)
-    return history.map(commit => ({
-      version: commit.hash,
-      message: commit.message,
-      timestamp: new Date(commit.timestamp),
-      parent: commit.parent,
-    }))
-  }
-
-  // Extended method to get commit info
-  async getCommit(hash: string): Promise<{ tree: string; parent?: string; message: string; timestamp: number } | null> {
-    try {
-      return await this.client.getCommit(hash)
-    } catch {
-      return null
-    }
-  }
-
-  // Create a tag for a module version
-  createTag(name: string, tag: string, commitSha: string): void {
-    this.client.createTag(name, tag, commitSha)
-  }
-}
-
-// Singleton storage instance
-const gitxClient = new InMemoryGitxClient()
-const gitxStorage = new WorkerGitxStorage(gitxClient)
+import type { StoredModule } from '../storage/types.js'
+import { generateSha, gitxStorage } from './storage.js'
 
 // =============================================================================
 // Extended WriteResult with commit info for API responses
 // =============================================================================
-interface ExtendedWriteResult extends WriteResult {
-  files: string[]
-  commit: {
-    sha: string
-    message: string
-    author: string
-    timestamp: string
-  }
-  created?: boolean
-  updated?: boolean
-}
+// Note: ExtendedWriteResult is defined for future API response extensions
+// but currently not used as we construct response objects inline
 
 // Worker-compatible sandbox executor using unsafe_eval binding
 // This is used when running in Cloudflare Workers/miniflare environment
@@ -381,10 +172,22 @@ function extractExportNames(module: string): string[] {
   const classRegex = /export\s+class\s+(\w+)/g
 
   let match
-  while ((match = funcRegex.exec(module)) !== null) names.push(match[1])
-  while ((match = constRegex.exec(module)) !== null) names.push(match[1])
-  while ((match = letRegex.exec(module)) !== null) names.push(match[1])
-  while ((match = classRegex.exec(module)) !== null) names.push(match[1])
+  while ((match = funcRegex.exec(module)) !== null) {
+    const name = match[1]
+    if (name) names.push(name)
+  }
+  while ((match = constRegex.exec(module)) !== null) {
+    const name = match[1]
+    if (name) names.push(name)
+  }
+  while ((match = letRegex.exec(module)) !== null) {
+    const name = match[1]
+    if (name) names.push(name)
+  }
+  while ((match = classRegex.exec(module)) !== null) {
+    const name = match[1]
+    if (name) names.push(name)
+  }
 
   return names
 }
@@ -409,12 +212,13 @@ function createTestRunner() {
     try {
       fn()
       results.push({ name: fullName, status: 'passed', duration: Date.now() - start })
-    } catch (e) {
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e))
       results.push({
         name: fullName,
         status: 'failed',
         duration: Date.now() - start,
-        error: e instanceof Error ? e.message : String(e)
+        error: err.message
       })
     }
   }
@@ -442,23 +246,22 @@ function createTestRunner() {
       toThrow(message?: string | RegExp) {
         const fn = actual as () => void
         let threw = false
-        let thrownError: unknown
+        let thrownError: Error | null = null
         try {
           fn()
-        } catch (e) {
+        } catch (e: unknown) {
           threw = true
-          thrownError = e
+          thrownError = e instanceof Error ? e : new Error(String(e))
         }
         if (!threw) {
           throw new Error('Expected function to throw but it did not')
         }
-        if (message) {
-          const errorMsg = thrownError instanceof Error ? thrownError.message : String(thrownError)
-          if (typeof message === 'string' && !errorMsg.includes(message)) {
-            throw new Error(`Expected error message to include "${message}" but got "${errorMsg}"`)
+        if (message && thrownError) {
+          if (typeof message === 'string' && !thrownError.message.includes(message)) {
+            throw new Error(`Expected error message to include "${message}" but got "${thrownError.message}"`)
           }
-          if (message instanceof RegExp && !message.test(errorMsg)) {
-            throw new Error(`Expected error message to match ${message} but got "${errorMsg}"`)
+          if (message instanceof RegExp && !message.test(thrownError.message)) {
+            throw new Error(`Expected error message to match ${message} but got "${thrownError.message}"`)
           }
         }
       },
@@ -513,8 +316,9 @@ function createFunction(...args: string[]): (...fnArgs: unknown[]) => unknown {
   // This works in Node.js test environment but not in workerd
   try {
     return new Function(...params, body) as (...fnArgs: unknown[]) => unknown
-  } catch (e) {
-    throw new Error(`Code generation from strings is not allowed. The unsafe_eval binding may not be configured. Original error: ${e instanceof Error ? e.message : String(e)}`)
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e))
+    throw new Error(`Code generation from strings is not allowed. The unsafe_eval binding may not be configured. Original error: ${err.message}`)
   }
 }
 
@@ -579,9 +383,9 @@ async function workerRunTests(moduleCode: string, testCode: string, timeout: num
       duration: Date.now() - startTime,
       tests: testResults
     }
-  } catch (e) {
-    const error = e instanceof Error ? e.message : String(e)
-    const isTimeout = error.toLowerCase().includes('timeout')
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e))
+    const isTimeout = err.message.toLowerCase().includes('timeout')
 
     return {
       passed: 0,
@@ -591,7 +395,7 @@ async function workerRunTests(moduleCode: string, testCode: string, timeout: num
       tests: [{
         name: isTimeout ? 'Test execution' : 'Module/Test parsing',
         status: 'failed',
-        error
+        error: err.message
       }]
     }
   }
@@ -678,12 +482,12 @@ async function workerRunScript(
       logs,
       duration: Date.now() - startTime
     }
-  } catch (e) {
-    const error = e instanceof Error ? e.message : String(e)
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e : new Error(String(e))
 
     return {
       success: false,
-      error,
+      error: err.message,
       logs,
       duration: Date.now() - startTime
     }
@@ -890,13 +694,18 @@ export function chunk(arr, size) { return _.chunk(arr, size); }`,
 
   // Initialize test modules in GitxStorage
   for (const mod of testModules) {
-    await gitxStorage.write(mod.name, mod)
+    const result = await gitxStorage.write(mod.name, mod)
+    // Create v1.0.0 tag for @math/add module for version GET tests
+    if (mod.name === '@math/add') {
+      gitxStorage.createTag(mod.name, 'v1.0.0', result.version)
+    }
   }
 }
 
 // Rate limiting state
 const requestCounts = new Map<string, { count: number; resetAt: number }>()
-const RATE_LIMIT = 100
+const READ_RATE_LIMIT = 500  // Higher limit for GET (read) operations
+const WRITE_RATE_LIMIT = 100  // Lower limit for POST/DELETE (write) operations
 const RATE_WINDOW = 60000 // 1 minute
 
 // Helper: Generate request ID
@@ -906,27 +715,51 @@ function generateRequestId(): string {
 
 // Helper: Get client IP for rate limiting
 function getClientIP(request: Request): string {
-  return request.headers.get('cf-connecting-ip') ||
-         request.headers.get('x-forwarded-for') ||
-         'unknown'
+  const cfIp = request.headers.get('cf-connecting-ip')
+  const xForwardedFor = request.headers.get('x-forwarded-for')
+  const ip = cfIp || xForwardedFor || 'unknown'
+  // DEBUG: Log IP extraction
+  console.log(`[Rate Limit] IP extraction: cf=${cfIp}, xff=${xForwardedFor}, result=${ip}`)
+  return ip
 }
 
 // Helper: Check rate limit
-function checkRateLimit(ip: string): { allowed: boolean; limit: number; remaining: number } {
+// Uses separate limits for read (GET) vs write (POST/DELETE) operations
+function checkRateLimit(ip: string, isWriteOperation: boolean = false): {
+  allowed: boolean
+  limit: number
+  remaining: number
+  resetAt: number  // Unix timestamp in seconds
+  retryAfter: number  // Seconds until reset
+} {
   const now = Date.now()
-  let entry = requestCounts.get(ip)
+  const limit = isWriteOperation ? WRITE_RATE_LIMIT : READ_RATE_LIMIT
+  const key = `${ip}:${isWriteOperation ? 'write' : 'read'}`
+  let entry = requestCounts.get(key)
 
   if (!entry || entry.resetAt < now) {
     entry = { count: 0, resetAt: now + RATE_WINDOW }
-    requestCounts.set(ip, entry)
+    requestCounts.set(key, entry)
   }
 
+  // Check if allowed BEFORE incrementing (so first request is always allowed)
+  const allowed = entry.count < limit
+
+  // Increment count
   entry.count++
 
+  const resetAtSeconds = Math.floor(entry.resetAt / 1000)
+  const retryAfter = Math.max(1, Math.ceil((entry.resetAt - now) / 1000))
+
+  // Remaining is calculated AFTER increment (current request counts against the limit)
+  const remaining = Math.max(0, limit - entry.count)
+
   return {
-    allowed: entry.count <= RATE_LIMIT,
-    limit: RATE_LIMIT,
-    remaining: Math.max(0, RATE_LIMIT - entry.count)
+    allowed,
+    limit,
+    remaining,
+    resetAt: resetAtSeconds,
+    retryAfter
   }
 }
 
@@ -935,7 +768,7 @@ const CORS_CONFIG = {
   allowOrigins: ['*'],  // Can be restricted to specific origins if needed
   allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization', 'Accept'],
-  exposeHeaders: ['ETag', 'Cache-Control', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-Request-Id'],
+  exposeHeaders: ['ETag', 'Cache-Control', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'Retry-After', 'X-Request-Id'],
   maxAge: 86400 // 24 hours
 }
 
@@ -957,7 +790,8 @@ interface ValidationResult {
 }
 
 // Helper: Validate request content type
-function validateContentType(request: Request): ValidationResult {
+// Note: Exported for use in route handlers that need content-type validation
+export function validateContentType(request: Request): ValidationResult {
   const contentType = request.headers.get('content-type')
   if (!contentType || !contentType.includes('application/json')) {
     return {
@@ -978,7 +812,8 @@ interface ApiResponse {
   details?: Record<string, unknown>
 }
 
-function createApiResponse(
+// Note: createApiResponse is exported for potential external use in route handlers
+export function createApiResponse(
   data: unknown,
   status: number,
   requestId: string,
@@ -1040,33 +875,22 @@ class ApiError extends Error {
   }
 }
 
-class ValidationError extends ApiError {
+// Note: ValidationError is exported for use in external validation handlers
+export class ValidationError extends ApiError {
   constructor(message: string, details?: Record<string, unknown>) {
     super(message, 400, details)
     this.name = 'ValidationError'
   }
 }
 
-class NotFoundError extends ApiError {
-  constructor(message: string) {
-    super(message, 404)
-    this.name = 'NotFoundError'
-  }
-}
-
-class AuthenticationError extends ApiError {
+// Note: AuthenticationError is exported for use in auth middleware
+export class AuthenticationError extends ApiError {
   constructor(message: string = 'Authentication required') {
     super(message, 401)
     this.name = 'AuthenticationError'
   }
 }
 
-class RateLimitError extends ApiError {
-  constructor(limit: number, remaining: number) {
-    super('Rate limit exceeded', 429, { limit, remaining })
-    this.name = 'RateLimitError'
-  }
-}
 
 // Helper: Create error response
 function errorResponse(
@@ -1093,63 +917,92 @@ function parseModulePath(path: string): {
   version?: string
   extension?: string
   action?: string
+  depsAction?: string
 } | null {
   // Remove leading slash
   path = path.startsWith('/') ? path.slice(1) : path
 
   if (!path) return null
 
+  // Check for deps routes (e.g., /math/stats/deps, /math/stats/deps/tree, /math/stats/deps/resolve)
+  const depsMatch = path.match(/^(@?[^/]+)\/([^/]+)\/deps(?:\/([a-z]+))?$/)
+  if (depsMatch) {
+    const [, scopeMatch, nameMatch, depsActionMatch] = depsMatch
+    if (!scopeMatch || !nameMatch) return null
+    return {
+      scope: scopeMatch.replace(/^@/, ''),
+      name: nameMatch,
+      action: 'deps',
+      depsAction: depsActionMatch || 'direct'
+    }
+  }
+
   // Check for actions first (e.g., /math/add/test or /math/add/run or /math/add/diff or /math/add/revert)
   const actionMatch = path.match(/^(@?[^/]+)\/([^/]+)\/(test|run|diff|revert)$/)
   if (actionMatch) {
-    const [, scope, name, action] = actionMatch
-    return { scope: scope.replace(/^@/, ''), name, action }
+    const [, scopeMatch, nameMatch, actionMatch2] = actionMatch
+    if (!scopeMatch || !nameMatch || !actionMatch2) return null
+    return { scope: scopeMatch.replace(/^@/, ''), name: nameMatch, action: actionMatch2 }
   }
 
   // Check for extensions with version (e.g., /math/add@v1.0.0.mjs)
   // Need to handle version that may contain dots (like v1.0.0) followed by extension
   const versionExtMatch = path.match(/^(@?[^/]+)\/([^@]+)@((?:[^.]+\.)*[^.]+?)(\.(?:d\.ts|mjs|test\.js|script\.js|bundle\.mjs))$/)
   if (versionExtMatch) {
-    const [, scope, name, version, extension] = versionExtMatch
+    const [, scopeMatch, nameMatch, versionMatch, extensionMatch] = versionExtMatch
+    if (!scopeMatch || !nameMatch || !versionMatch || !extensionMatch) return null
     return {
-      scope: scope.replace(/^@/, ''),
-      name,
-      version,
-      extension: extension?.slice(1)  // Remove leading dot
+      scope: scopeMatch.replace(/^@/, ''),
+      name: nameMatch,
+      version: versionMatch,
+      extension: extensionMatch.slice(1)  // Remove leading dot
     }
   }
 
   // Check for version without extension (e.g., /math/add@v1.0.0)
   const versionOnlyMatch = path.match(/^(@?[^/]+)\/([^@]+)@([^.\/][^\/]*)$/)
   if (versionOnlyMatch) {
-    const [, scope, name, version] = versionOnlyMatch
+    const [, scopeMatch, nameMatch, versionMatch] = versionOnlyMatch
+    if (!scopeMatch || !nameMatch || !versionMatch) return null
     return {
-      scope: scope.replace(/^@/, ''),
-      name,
-      version
+      scope: scopeMatch.replace(/^@/, ''),
+      name: nameMatch,
+      version: versionMatch
     }
   }
 
   // Check for extensions (e.g., /math/add.mjs)
   const extMatch = path.match(/^(@?[^/]+)\/([^.]+)(\.(?:d\.ts|mjs|test\.js|script\.js|bundle\.mjs))$/)
   if (extMatch) {
-    const [, scope, name, extension] = extMatch
+    const [, scopeMatch, nameMatch, extensionMatch] = extMatch
+    if (!scopeMatch || !nameMatch || !extensionMatch) return null
     return {
-      scope: scope.replace(/^@/, ''),
-      name,
-      extension: extension.slice(1)  // Remove leading dot
+      scope: scopeMatch.replace(/^@/, ''),
+      name: nameMatch,
+      extension: extensionMatch.slice(1)  // Remove leading dot
     }
   }
 
   // Simple module path (e.g., /math/add or /math/add@v1.0.0)
   const simpleMatch = path.match(/^(@?[^/]+)\/([^@]+)(?:@(.+))?$/)
   if (simpleMatch) {
-    const [, scope, name, version] = simpleMatch
-    return {
-      scope: scope.replace(/^@/, ''),
-      name,
-      version
+    const [, scopeMatch, nameMatch, versionMatch] = simpleMatch
+    if (!scopeMatch || !nameMatch) return null
+    const result: {
+      scope: string
+      name: string
+      version?: string
+      extension?: string
+      action?: string
+      depsAction?: string
+    } = {
+      scope: scopeMatch.replace(/^@/, ''),
+      name: nameMatch,
     }
+    if (versionMatch) {
+      result.version = versionMatch
+    }
+    return result
   }
 
   return null
@@ -1215,15 +1068,23 @@ async function runTests(module: StoredModule, timeout?: number): Promise<TestRes
   const result = await workerRunTests(module.module, module.tests, timeout || 5000)
 
   // Convert WorkerTestResult to our TestResults format
-  const results: TestResult[] = result.tests.map(test => ({
-    name: test.name,
-    status: test.status,
-    duration: test.duration || 0,
-    error: test.error ? {
-      message: test.error,
-      stack: test.error
-    } : undefined
-  }))
+  const results: TestResult[] = result.tests.map(test => {
+    const base = {
+      name: test.name,
+      status: test.status,
+      duration: test.duration || 0,
+    }
+    if (test.error) {
+      return {
+        ...base,
+        error: {
+          message: test.error,
+          stack: test.error
+        }
+      }
+    }
+    return base
+  })
 
   return {
     passed: result.passed,
@@ -1253,12 +1114,15 @@ async function runScript(module: StoredModule, input?: Record<string, unknown>, 
   }))
 
   if (!result.success) {
-    return {
+    const runResult: RunResult = {
       logs,
       duration: result.duration,
-      error: result.error,
-      stack: result.error
     }
+    if (result.error) {
+      runResult.error = result.error
+      runResult.stack = result.error
+    }
+    return runResult
   }
 
   return {
@@ -1280,69 +1144,11 @@ function validateTypes(types: string): { valid: boolean; errors?: string[] } {
   return { valid: true }
 }
 
-// Middleware: Error handling wrapper
-async function withErrorHandling(
-  handler: () => Promise<Response>,
-  requestId: string,
-  requestOrigin?: string
-): Promise<Response> {
-  try {
-    return await handler()
-  } catch (error) {
-    if (error instanceof ApiError) {
-      return errorResponse(error.message, error.status, requestId, error.details)
-    }
-    if (error instanceof SyntaxError) {
-      return errorResponse('Invalid JSON in request body', 400, requestId)
-    }
-    // Log unexpected errors (full details go to console for debugging)
-    console.error(`[${requestId}] Unexpected error:`, error)
-    // Note: Error details are intentionally omitted from responses for security.
-    // In Cloudflare Workers, process.env is not available.
-    // Error details in production responses can leak implementation details.
-    return errorResponse(
-      'Internal server error',
-      500,
-      requestId
-    )
-  }
-}
-
-// Middleware: Request logging
-function logRequest(method: string, path: string, status: number, requestId: string, duration: number): void {
-  console.log(`[${requestId}] ${method} ${path} - ${status} (${duration}ms)`)
-}
-
 // Handle OPTIONS (preflight)
 function handleOptions(requestOrigin?: string): Response {
   const headers = new Headers()
   addCorsHeaders(headers, requestOrigin)
   return new Response(null, { status: 204, headers })
-}
-
-// Middleware: Rate limiting check
-function checkRateLimitMiddleware(ip: string): { allowed: boolean; limit: number; remaining: number } {
-  const rateLimit = checkRateLimit(ip)
-  if (!rateLimit.allowed) {
-    throw new RateLimitError(rateLimit.limit, rateLimit.remaining)
-  }
-  return rateLimit
-}
-
-// Helper: Add rate limit headers to response
-function addRateLimitHeaders(response: Response, limit: number, remaining: number): Response {
-  response.headers.set('X-RateLimit-Limit', limit.toString())
-  response.headers.set('X-RateLimit-Remaining', remaining.toString())
-  return response
-}
-
-// Helper: Validate module exists (async for GitxStorage)
-async function getModuleOrThrow(fullName: string, version?: string): Promise<StoredModule> {
-  const module = await gitxStorage.read(fullName, version)
-  if (!module) {
-    throw new NotFoundError(`Module '${fullName}' not found`)
-  }
-  return module
 }
 
 // Handle GET /:name - module info
@@ -1363,6 +1169,17 @@ async function handleGetModuleInfo(
   }
 
   const accept = request.headers.get('Accept') || 'application/json'
+
+  // Content negotiation: return JavaScript module for Accept: application/javascript
+  if (accept.includes('application/javascript')) {
+    const content = resolveImports(module.module)
+    const headers = new Headers({
+      'Content-Type': 'application/javascript'
+    })
+    addCorsHeaders(headers)
+    return new Response(content, { status: 200, headers })
+  }
+
   const versions = await gitxStorage.versions(fullName)
 
   // Analyze dependencies
@@ -1371,9 +1188,9 @@ async function handleGetModuleInfo(
   const importMatches = module.module.matchAll(/from\s+['"]([^'"]+)['"]/g)
   for (const match of importMatches) {
     const dep = match[1]
-    if (dep.startsWith('esm.do/') || dep.startsWith('https://esm.do/')) {
+    if (dep && (dep.startsWith('esm.do/') || dep.startsWith('https://esm.do/'))) {
       dependencies.push(dep.replace(/^(https:\/\/)?esm\.do\//, ''))
-    } else if (!dep.startsWith('.') && !dep.startsWith('/')) {
+    } else if (dep && !dep.startsWith('.') && !dep.startsWith('/')) {
       externalDependencies.push(dep)
     }
   }
@@ -1814,7 +1631,7 @@ async function handleDeleteModule(
 // Handle GET /:scope/ - list modules in scope
 async function handleListModules(
   scope: string,
-  requestId: string
+  _requestId: string
 ): Promise<Response> {
   const pattern = `@${scope}/*`
   const modules = await gitxStorage.list(pattern)
@@ -1969,6 +1786,287 @@ async function handleRevert(
   })
 }
 
+// =============================================================================
+// Dependency Route Handlers
+// =============================================================================
+
+// Helper: Extract dependencies from module code
+function extractDependencies(moduleCode: string): { internal: string[]; external: string[] } {
+  const internal: string[] = []
+  const external: string[] = []
+  const importMatches = moduleCode.matchAll(/from\s+['"]([^'"]+)['"]/g)
+
+  for (const match of importMatches) {
+    const dep = match[1]
+    if (dep && (dep.startsWith('esm.do/') || dep.startsWith('https://esm.do/'))) {
+      // Internal esm.do dependency
+      internal.push(dep.replace(/^(https:\/\/)?esm\.do\//, ''))
+    } else if (dep && !dep.startsWith('.') && !dep.startsWith('/')) {
+      // External npm dependency
+      external.push(dep)
+    }
+  }
+
+  return { internal, external }
+}
+
+// Helper: Build dependency tree recursively
+async function buildDependencyTree(
+  moduleName: string,
+  visited: Set<string> = new Set()
+): Promise<Record<string, unknown>> {
+  if (visited.has(moduleName)) {
+    return { _circular: true }
+  }
+
+  visited.add(moduleName)
+  const module = await gitxStorage.read(moduleName)
+
+  if (!module) {
+    return {}
+  }
+
+  const { internal } = extractDependencies(module.module)
+  const tree: Record<string, unknown> = {}
+
+  for (const dep of internal) {
+    tree[dep] = await buildDependencyTree(dep, new Set(visited))
+  }
+
+  return tree
+}
+
+// Helper: Get all dependencies flattened
+async function getAllDependencies(
+  moduleName: string,
+  collected: Set<string> = new Set(),
+  visited: Set<string> = new Set()
+): Promise<string[]> {
+  if (visited.has(moduleName)) {
+    return []
+  }
+
+  visited.add(moduleName)
+  const module = await gitxStorage.read(moduleName)
+
+  if (!module) {
+    return []
+  }
+
+  const { internal } = extractDependencies(module.module)
+
+  for (const dep of internal) {
+    collected.add(dep)
+    await getAllDependencies(dep, collected, visited)
+  }
+
+  return Array.from(collected)
+}
+
+// Helper: Detect circular dependencies
+async function detectCircularDependencies(
+  moduleName: string,
+  path: string[] = [],
+  visited: Set<string> = new Set()
+): Promise<string[][]> {
+  if (path.includes(moduleName)) {
+    // Found a cycle - return the cycle path
+    const cycleStart = path.indexOf(moduleName)
+    return [[...path.slice(cycleStart), moduleName]]
+  }
+
+  if (visited.has(moduleName)) {
+    return []
+  }
+
+  visited.add(moduleName)
+  const module = await gitxStorage.read(moduleName)
+
+  if (!module) {
+    return []
+  }
+
+  const { internal } = extractDependencies(module.module)
+  const cycles: string[][] = []
+
+  for (const dep of internal) {
+    const depCycles = await detectCircularDependencies(dep, [...path, moduleName], visited)
+    cycles.push(...depCycles)
+  }
+
+  return cycles
+}
+
+// Handle GET /:name/deps - direct dependencies
+async function handleGetDeps(
+  fullName: string,
+  requestId: string
+): Promise<Response> {
+  const module = await gitxStorage.read(fullName)
+
+  if (!module) {
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
+  }
+
+  const { internal } = extractDependencies(module.module)
+
+  return jsonResponse({
+    name: fullName,
+    dependencies: internal
+  })
+}
+
+// Handle GET /:name/deps/tree - dependency tree
+async function handleGetDepsTree(
+  fullName: string,
+  requestId: string
+): Promise<Response> {
+  const module = await gitxStorage.read(fullName)
+
+  if (!module) {
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
+  }
+
+  const tree = await buildDependencyTree(fullName)
+
+  return jsonResponse({
+    name: fullName,
+    tree
+  })
+}
+
+// Handle GET /:name/deps/flat - flattened dependencies
+async function handleGetDepsFlat(
+  fullName: string,
+  requestId: string
+): Promise<Response> {
+  const module = await gitxStorage.read(fullName)
+
+  if (!module) {
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
+  }
+
+  const dependencies = await getAllDependencies(fullName)
+
+  return jsonResponse({
+    dependencies,
+    count: dependencies.length
+  })
+}
+
+// Handle GET /:name/deps/external - external npm dependencies
+async function handleGetDepsExternal(
+  fullName: string,
+  requestId: string
+): Promise<Response> {
+  const module = await gitxStorage.read(fullName)
+
+  if (!module) {
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
+  }
+
+  const { external } = extractDependencies(module.module)
+
+  return jsonResponse({
+    external
+  })
+}
+
+// Handle GET /:name/deps/circular - detect circular dependencies
+async function handleGetDepsCircular(
+  fullName: string,
+  requestId: string
+): Promise<Response> {
+  const module = await gitxStorage.read(fullName)
+
+  if (!module) {
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
+  }
+
+  const cycles = await detectCircularDependencies(fullName)
+
+  return jsonResponse({
+    hasCircular: cycles.length > 0,
+    cycles
+  })
+}
+
+// Handle GET /:name/deps/resolve?import=... - resolve specific import
+async function handleGetDepsResolve(
+  fullName: string,
+  request: Request,
+  requestId: string
+): Promise<Response> {
+  const module = await gitxStorage.read(fullName)
+
+  if (!module) {
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
+  }
+
+  const url = new URL(request.url)
+  const importPath = url.searchParams.get('import')
+
+  if (!importPath) {
+    return errorResponse('Missing import query parameter', 400, requestId)
+  }
+
+  // Parse the import path to get module name
+  const depName = importPath.replace(/^(https:\/\/)?esm\.do\//, '')
+  const depModule = await gitxStorage.read(depName)
+
+  if (!depModule) {
+    return errorResponse(`Dependency '${depName}' not found`, 404, requestId)
+  }
+
+  return jsonResponse({
+    import: importPath,
+    resolved: {
+      name: depName,
+      version: depModule.version,
+      url: `https://esm.do/${depName}`
+    }
+  })
+}
+
+// Handle GET /:name/deps/graph - dependency graph with versions
+async function handleGetDepsGraph(
+  fullName: string,
+  requestId: string
+): Promise<Response> {
+  const module = await gitxStorage.read(fullName)
+
+  if (!module) {
+    return errorResponse(`Module '${fullName}' not found`, 404, requestId)
+  }
+
+  const nodes: Array<{ name: string; version: string }> = []
+  const edges: Array<{ from: string; to: string }> = []
+  const visited = new Set<string>()
+
+  async function traverse(modName: string): Promise<void> {
+    if (visited.has(modName)) return
+    visited.add(modName)
+
+    const mod = await gitxStorage.read(modName)
+    if (!mod) return
+
+    nodes.push({ name: modName, version: mod.version || 'latest' })
+
+    const { internal } = extractDependencies(mod.module)
+    for (const dep of internal) {
+      edges.push({ from: modName, to: dep })
+      await traverse(dep)
+    }
+  }
+
+  await traverse(fullName)
+
+  return jsonResponse({
+    nodes,
+    edges
+  })
+}
+
 // Main fetch handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -1988,47 +2086,62 @@ export default {
       return handleOptions()
     }
 
-    // Rate limiting
+    // Rate limiting - use different limits for read vs write operations
     const ip = getClientIP(request)
-    const rateLimit = checkRateLimit(ip)
+    const isWriteOperation = method === 'POST' || method === 'DELETE'
+    const rateLimit = checkRateLimit(ip, isWriteOperation)
 
     // Add rate limit headers to response helper
-    const addRateLimitHeaders = (response: Response): Response => {
+    const addRateLimitHeadersFn = (response: Response, isRateLimited: boolean = false): Response => {
       response.headers.set('X-RateLimit-Limit', rateLimit.limit.toString())
       response.headers.set('X-RateLimit-Remaining', rateLimit.remaining.toString())
+      response.headers.set('X-RateLimit-Reset', rateLimit.resetAt.toString())
+      if (isRateLimited) {
+        response.headers.set('Retry-After', rateLimit.retryAfter.toString())
+      }
       return response
     }
 
     if (!rateLimit.allowed) {
-      return addRateLimitHeaders(errorResponse('Rate limit exceeded', 429, requestId))
+      const errorBody = {
+        error: 'Rate limit exceeded',
+        status: 429,
+        requestId
+      }
+      const headers = new Headers({ 'Content-Type': 'application/json', 'X-Request-Id': requestId })
+      addCorsHeaders(headers)
+      const response = new Response(JSON.stringify(errorBody), { status: 429, headers })
+      return addRateLimitHeadersFn(response, true)
     }
 
     // Handle scope listing (e.g., /storage/ to list modules in @storage scope)
     const listMatch = path.match(/^\/([a-zA-Z0-9_-]+)\/$/)
     if (listMatch && method === 'GET') {
       const scope = listMatch[1]
-      return addRateLimitHeaders(await handleListModules(scope, requestId))
+      if (scope) {
+        return addRateLimitHeadersFn(await handleListModules(scope, requestId))
+      }
     }
 
     // Parse the path
     const parsed = parseModulePath(path)
 
     if (!parsed) {
-      return addRateLimitHeaders(errorResponse('Invalid path', 400, requestId))
+      return addRateLimitHeadersFn(errorResponse('Invalid path', 400, requestId))
     }
 
-    const { scope, name, version, extension, action } = parsed
+    const { scope, name, version, extension, action, depsAction } = parsed
 
     // Validate module name
     if (!isValidModuleName(scope, name)) {
-      return addRateLimitHeaders(errorResponse('Invalid module name', 400, requestId))
+      return addRateLimitHeadersFn(errorResponse('Invalid module name', 400, requestId))
     }
 
     const fullName = getFullName(scope, name)
 
     // Handle unsupported methods
     if (!['GET', 'POST', 'DELETE'].includes(method)) {
-      return addRateLimitHeaders(errorResponse('Method not allowed', 405, requestId))
+      return addRateLimitHeadersFn(errorResponse('Method not allowed', 405, requestId))
     }
 
     let response: Response
@@ -2036,7 +2149,34 @@ export default {
     try {
       // Route based on method and path
       if (method === 'GET') {
-        if (action === 'diff') {
+        if (action === 'deps') {
+          // Handle dependency routes
+          switch (depsAction) {
+            case 'direct':
+              response = await handleGetDeps(fullName, requestId)
+              break
+            case 'tree':
+              response = await handleGetDepsTree(fullName, requestId)
+              break
+            case 'flat':
+              response = await handleGetDepsFlat(fullName, requestId)
+              break
+            case 'external':
+              response = await handleGetDepsExternal(fullName, requestId)
+              break
+            case 'circular':
+              response = await handleGetDepsCircular(fullName, requestId)
+              break
+            case 'resolve':
+              response = await handleGetDepsResolve(fullName, request, requestId)
+              break
+            case 'graph':
+              response = await handleGetDepsGraph(fullName, requestId)
+              break
+            default:
+              response = await handleGetDeps(fullName, requestId)
+          }
+        } else if (action === 'diff') {
           response = await handleDiff(fullName, request, requestId)
         } else if (extension === 'd.ts') {
           response = await handleGetTypes(fullName, version, request, requestId)
@@ -2066,18 +2206,15 @@ export default {
       } else {
         response = errorResponse('Method not allowed', 405, requestId)
       }
-    } catch (error) {
+    } catch (error: unknown) {
       if (error instanceof ApiError) {
         response = errorResponse(error.message, error.status, requestId, error.details)
       } else {
-        response = errorResponse(
-          error instanceof Error ? error.message : 'Internal server error',
-          500,
-          requestId
-        )
+        const err = error instanceof Error ? error : new Error(String(error))
+        response = errorResponse(err.message, 500, requestId)
       }
     }
 
-    return addRateLimitHeaders(response)
+    return addRateLimitHeadersFn(response)
   }
 }

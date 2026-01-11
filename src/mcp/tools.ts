@@ -132,7 +132,7 @@ export interface ValidationSuccess {
 /**
  * Typed registry of all MCP tools with proper input schema validation
  */
-export const mcpTools: Record<string, MCPTool<any>> = {
+export const mcpTools: Record<string, MCPTool<Record<string, unknown>>> = {
   esm_write: {
     name: 'esm_write',
     description: 'Create or update an ESM module with types, code, tests, and script',
@@ -326,9 +326,11 @@ function validateInput(
 
   // Validate required parameters
   for (const param of required) {
-    const value = input[param]
-    if (value === undefined || value === null || value === '') {
-      errors[String(param)] = `Required parameter "${String(param)}" is missing or empty`
+    if (typeof param === 'string') {
+      const value = input[param]
+      if (value === undefined || value === null || value === '') {
+        errors[param] = `Required parameter "${param}" is missing or empty`
+      }
     }
   }
 
@@ -424,13 +426,14 @@ export async function handleToolCall(
   try {
     switch (toolName) {
       case 'esm_write': {
-        const result = await esm.write({
+        const writeOptions: { name: string; types?: string; module?: string; tests?: string; script?: string } = {
           name: input.name as string,
-          types: input.types as string | undefined,
-          module: input.module as string | undefined,
-          tests: input.tests as string | undefined,
-          script: input.script as string | undefined,
-        })
+        }
+        if (input.types) writeOptions.types = input.types as string
+        if (input.module) writeOptions.module = input.module as string
+        if (input.tests) writeOptions.tests = input.tests as string
+        if (input.script) writeOptions.script = input.script as string
+        const result = await esm.write(writeOptions)
         return successResponse(
           `Module written successfully.\nVersion: ${result.version}` +
             (result.testResults
@@ -491,8 +494,11 @@ export async function handleToolCall(
         const pattern = input.pattern as string | undefined
         const scope = input.scope as string | undefined
 
-        // Pass filter parameters to esm.list
-        const result = await esm.list({ pattern, scope })
+        // Pass filter parameters to esm.list - only include defined values
+        const listOptions: { pattern?: string; scope?: string } = {}
+        if (pattern) listOptions.pattern = pattern
+        if (scope) listOptions.scope = scope
+        const result = await esm.list(listOptions)
 
         // Apply client-side filtering for handlers that don't implement filtering
         let filtered = result

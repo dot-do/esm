@@ -817,9 +817,8 @@ describe('ESM', () => {
       await expect(esm.read('@test/lifecycle')).rejects.toThrow()
     })
 
-    it.skip('should handle modules that import other esm.do modules', async () => {
-      // SKIP: Cross-module imports from 'esm.do/@scope/name' require import resolution
-      // that is not yet fully implemented in the sandbox environment
+    it('should handle modules that import other esm.do modules', async () => {
+      // RED test: Cross-module imports from 'esm.do/@scope/name' require import resolution
       // Create dependency module
       await esm.write({
         name: '@test/utils',

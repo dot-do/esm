@@ -101,14 +101,20 @@ function extractImportSpecifiers(code: string): string[] {
   // Match static import statements: import ... from 'specifier'
   const importFromRegex = /import\s+(?:[\w\s{},*]+\s+from\s+)?['"]([^'"]+)['"]/g
   let match
+  // Reset lastIndex for global regex before exec loop
+  importFromRegex.lastIndex = 0
   while ((match = importFromRegex.exec(code)) !== null) {
-    specifiers.push(match[1])
+    const specifier = match[1]
+    if (specifier) specifiers.push(specifier)
   }
 
   // Match export ... from 'specifier'
   const exportFromRegex = /export\s+(?:[\w\s{},*]+\s+from\s+)['"]([^'"]+)['"]/g
+  // Reset lastIndex for global regex before exec loop
+  exportFromRegex.lastIndex = 0
   while ((match = exportFromRegex.exec(code)) !== null) {
-    specifiers.push(match[1])
+    const specifier = match[1]
+    if (specifier) specifiers.push(specifier)
   }
 
   return specifiers
@@ -134,7 +140,7 @@ function isAllowedImport(specifier: string): { allowed: boolean; reason?: string
   }
 
   // Block Node.js built-ins
-  const baseModule = specifier.split('/')[0]
+  const baseModule = specifier.split('/')[0] ?? ''
   if (BLOCKED_NODE_BUILTINS.includes(baseModule) || BLOCKED_NODE_BUILTINS.includes(specifier)) {
     return { allowed: false, reason: `Node.js built-in '${specifier}' is blocked` }
   }

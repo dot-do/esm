@@ -15,9 +15,20 @@ import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 
-let chalk: any = null
+// Chalk type definition for optional chalk usage
+interface ChalkLike {
+  red: (s: string) => string
+  green: (s: string) => string
+  cyan: (s: string) => string
+  yellow: (s: string) => string
+  bold: { blue: (s: string) => string }
+}
+
+let chalk: ChalkLike | null = null
 try {
-  chalk = (await import('chalk')).default
+  // @ts-expect-error chalk module may not have type declarations
+  const chalkModule = await import('chalk')
+  chalk = chalkModule.default as ChalkLike
 } catch {
   // chalk not available, use plain text
 }
@@ -53,13 +64,6 @@ function formatSuccess(message: string): string {
  */
 function formatInfo(message: string): string {
   return chalk ? chalk.cyan(message) : message
-}
-
-/**
- * Format and colorize warning message
- */
-function formatWarning(message: string): string {
-  return chalk ? chalk.yellow(`warning: ${message}`) : `warning: ${message}`
 }
 
 /**
@@ -158,8 +162,9 @@ Module names must include a scope in the format @scope/name`
       })
       console.log(formatSuccess(`Initialized ${name} with ${options.template} template`))
       console.log(formatInfo(`Version: ${result.version}`))
-    } catch (error) {
-      console.error(formatError(error instanceof Error ? error.message : String(error)))
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
       process.exit(1)
     }
   })
@@ -227,8 +232,9 @@ Content can be provided via --file, --content, or --stdin`
         script: options.script || '',
       })
       console.log(formatSuccess(`Written ${name}@${result.version}`))
-    } catch (error) {
-      console.error(formatError(error instanceof Error ? error.message : String(error)))
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
       process.exit(1)
     }
   })
@@ -271,8 +277,9 @@ program
           console.log(module.module)
         }
       }
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -297,13 +304,17 @@ program
       if (options.env) {
         for (const e of options.env) {
           const [key, ...valueParts] = e.split('=')
-          env[key] = valueParts.join('=')
+          if (key) {
+            env[key] = valueParts.join('=')
+          }
         }
       }
 
+      // Convert args array to record format expected by ESM
+      const argsRecord: Record<string, unknown> = { _: args }
       const result = await esm.run({
         name,
-        args,
+        args: argsRecord,
         timeout: parseInt(options.timeout || '30000', 10),
         env,
       })
@@ -316,8 +327,9 @@ program
       }
 
       process.exit(result.exitCode)
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -354,8 +366,9 @@ program
       }
 
       process.exit(result.failed > 0 ? 1 : 0)
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -383,14 +396,15 @@ program
       } else {
         for (const v of versions) {
           if (options.verbose) {
-            console.log(`${v.hash} - ${v.message} (${new Date(v.timestamp).toISOString()})`)
+            console.log(`${v.version} - ${v.message} (${new Date(v.timestamp).toISOString()})`)
           } else {
-            console.log(v.hash)
+            console.log(v.version)
           }
         }
       }
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -418,7 +432,7 @@ program
 
       // Filter by since date if specified
       const filteredLogs = options.since
-        ? logs.filter(entry => entry.timestamp >= new Date(options.since!).getTime())
+        ? logs.filter(entry => entry.timestamp.getTime() >= new Date(options.since!).getTime())
         : logs
 
       if (options.json) {
@@ -426,18 +440,19 @@ program
       } else {
         for (const entry of filteredLogs) {
           if (options.verbose) {
-            console.log(`commit ${entry.hash}`)
+            console.log(`commit ${entry.version}`)
             console.log(`Date: ${new Date(entry.timestamp).toISOString()}`)
             console.log(``)
             console.log(`    ${entry.message}`)
             console.log(``)
           } else {
-            console.log(`${entry.hash.substring(0, 7)} ${entry.message}`)
+            console.log(`${entry.version.substring(0, 7)} ${entry.message}`)
           }
         }
       }
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -480,8 +495,9 @@ program
       } else {
         console.log(diff.diff)
       }
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -513,20 +529,21 @@ program
       try {
         const result = await esm.delete(name)
         console.log(formatSuccess(`Deleted ${result.name}`))
-      } catch (deleteError) {
+      } catch (deleteError: unknown) {
         // In test mode, allow testing the --force flag output without a real module
         // But only for specific test modules, not "non-existent" test cases
+        const delErr = deleteError instanceof Error ? deleteError : new Error(String(deleteError))
         if (process.env.NODE_ENV === 'test' &&
-            deleteError instanceof Error &&
-            deleteError.message.includes('not found') &&
+            delErr.message.includes('not found') &&
             !name.includes('non-existent')) {
           console.log(formatSuccess(`Deleted ${name}`))
           return
         }
-        throw deleteError
+        throw delErr
       }
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -549,8 +566,9 @@ program
         console.log('Interactive login not yet implemented')
         console.log('Use --token <token> to provide an API token')
       }
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -567,8 +585,9 @@ program
       delete config['auth.token']
       saveConfig(config)
       console.log('Logged out successfully')
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })
@@ -587,8 +606,9 @@ program
       } else {
         console.log('Not logged in')
       }
-    } catch (error) {
-      console.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(`error: ${err.message}`)
       process.exit(1)
     }
   })

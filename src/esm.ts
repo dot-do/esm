@@ -18,12 +18,14 @@ import type {
   DeleteResult,
   FileChange,
   DiffResult,
+  Logger,
 } from './types.js'
 import * as crypto from 'node:crypto'
 import { SandboxExecutor } from './executor/sandbox.js'
-import { sanitizeTypeDefinitions } from './executor/sanitize.js'
+import { sanitizeTypeDefinitions, sanitizeModuleCode } from './executor/sanitize.js'
 import { DependencyResolver } from './resolver/dependency.js'
 import { ModuleNotFoundError, ValidationError, ExecutionError } from './errors.js'
+import { LRUCache } from './cache/lru.js'
 
 // Re-export types from types.ts for external consumers
 export type {
@@ -184,7 +186,9 @@ export interface ESMOptions {
   storage?: ModuleStorage
   enableCaching?: boolean
   cacheSize?: number
+  cacheTTL?: number
   validateOnWrite?: boolean
+  logger?: Logger
 }
 
 /**
@@ -192,10 +196,13 @@ export interface ESMOptions {
  */
 export class ESM {
   private storage: ModuleStorage
-  // Storage for module resolution (for imports)
-  private moduleCache: Map<string, Record<string, unknown>> = new Map()
-  private options: Required<ESMOptions>
+  // LRU cache for module exports with TTL support
+  private moduleCache!: LRUCache<string, Record<string, unknown>>
+  // Track dependencies: dependencyMap[module] = Set of modules that import it
+  private dependencyMap: Map<string, Set<string>> = new Map()
+  private options: Required<Omit<ESMOptions, 'logger' | 'cacheTTL'>> & { logger?: Logger; cacheTTL?: number }
   private sandbox: SandboxExecutor
+  private logger?: Logger
 
   /**
    * Create a new ESM instance with configuration
@@ -231,13 +238,33 @@ export class ESM {
     // Set storage
     this.storage = resolvedOptions.storage || new InMemoryStorage()
 
-    // Set default options
-    this.options = {
+    // Set default options - handle logger separately to avoid exactOptionalPropertyTypes issues
+    const baseOptions = {
       storage: this.storage,
       enableCaching: resolvedOptions.enableCaching ?? true,
       cacheSize: resolvedOptions.cacheSize ?? 1000,
       validateOnWrite: resolvedOptions.validateOnWrite ?? true,
     }
+    // Handle optional properties separately
+    const optionalProps: { logger?: Logger; cacheTTL?: number } = {}
+    if (resolvedOptions.logger) {
+      optionalProps.logger = resolvedOptions.logger
+    }
+    if (resolvedOptions.cacheTTL !== undefined) {
+      optionalProps.cacheTTL = resolvedOptions.cacheTTL
+    }
+    this.options = { ...baseOptions, ...optionalProps }
+
+    // Initialize logger only if provided
+    if (resolvedOptions.logger) {
+      this.logger = resolvedOptions.logger
+    }
+
+    // Initialize LRU cache with size and optional TTL
+    this.moduleCache = new LRUCache<string, Record<string, unknown>>(
+      this.options.cacheSize,
+      this.options.cacheTTL
+    )
 
     // Initialize sandbox executor for safe code execution
     this.sandbox = new SandboxExecutor()
@@ -264,25 +291,6 @@ export class ESM {
         throw new ValidationError('Invalid storage implementation: must implement ModuleStorage interface')
       }
     }
-  }
-
-  /**
-   * Add a module to cache, respecting cache size limits
-   */
-  private addToCache(name: string, exports: Record<string, unknown>): void {
-    if (!this.options.enableCaching) {
-      return
-    }
-
-    // If cache is full, remove oldest entry (simple FIFO)
-    if (this.moduleCache.size >= this.options.cacheSize) {
-      const firstKey = this.moduleCache.keys().next().value
-      if (firstKey) {
-        this.moduleCache.delete(firstKey)
-      }
-    }
-
-    this.moduleCache.set(name, exports)
   }
 
   /**
@@ -401,6 +409,17 @@ export class ESM {
       throw new ExecutionError(result.error || 'Module execution failed')
     }
 
+    // Check for module-level errors in logs (sandbox may capture them as logs instead of failures)
+    const moduleErrors = result.logs.filter(log =>
+      log.level === 'error' &&
+      log.args.some(arg => String(arg).startsWith('Module error:'))
+    )
+    const firstError = moduleErrors[0]
+    if (firstError) {
+      const errorMessage = firstError.args.join(' ').replace('Module error: ', '')
+      throw new ExecutionError(errorMessage)
+    }
+
     return (result.value as Record<string, unknown>) || {}
   }
 
@@ -414,19 +433,22 @@ export class ESM {
     const funcRegex = /export\s+(?:async\s+)?function\s+(\w+)/g
     let match
     while ((match = funcRegex.exec(moduleCode)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name) names.push(name)
     }
 
     // Match export const name
     const constRegex = /export\s+const\s+(\w+)/g
     while ((match = constRegex.exec(moduleCode)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name) names.push(name)
     }
 
     // Match export let name
     const letRegex = /export\s+let\s+(\w+)/g
     while ((match = letRegex.exec(moduleCode)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name) names.push(name)
     }
 
     return names
@@ -508,6 +530,12 @@ export class ESM {
     // Validate name format
     this.validateName(options.name)
 
+    // Sanitize module code - check for dangerous patterns
+    const moduleSanitization = sanitizeModuleCode(options.module)
+    if (!moduleSanitization.valid) {
+      throw new ValidationError(`Module code sanitization failed: ${moduleSanitization.errors.join('; ')}`, { errors: moduleSanitization.errors.join('; ') })
+    }
+
     // Sanitize type definitions
     const typesSanitization = sanitizeTypeDefinitions(options.types)
     if (!typesSanitization.valid) {
@@ -536,8 +564,13 @@ export class ESM {
       try {
         const result = await this.executeScriptSandboxed(options.module, options.script, undefined)
         value = result.value
-      } catch {
+      } catch (error: unknown) {
         // Script execution failed - that's okay for write, run() will throw
+        const err = error instanceof Error ? error : new Error(String(error))
+        this.logger?.warn('Script execution failed during write', {
+          name: options.name,
+          error: err.message
+        })
         value = undefined
       }
     }
@@ -553,14 +586,27 @@ export class ESM {
 
     const writeResult = await this.storage.write(options.name, storedModule)
 
+    // Invalidate cache for this module and all dependents
+    this.invalidateCacheForModule(options.name)
+
+    // Track dependencies if this module has esm.do imports
+    if (this.hasEsmDoImports(options.module)) {
+      this.trackDependencies(options.name, options.module)
+    }
+
     // Cache the module exports for future imports using sandbox
     // Skip if module has esm.do imports (dependencies might not be available yet)
     if (!this.hasEsmDoImports(options.module)) {
       try {
         const exports = await this.executeModuleSandboxed(options.module)
         this.moduleCache.set(options.name, exports)
-      } catch {
+      } catch (error: unknown) {
         // Execution failed - that's okay, we'll try again during run()
+        const err = error instanceof Error ? error : new Error(String(error))
+        this.logger?.warn('Module cache failed during write', {
+          name: options.name,
+          error: err.message
+        })
       }
     }
 
@@ -569,6 +615,44 @@ export class ESM {
       version: writeResult.version,
       testResults,
       value,
+    }
+  }
+
+  /**
+   * Invalidate cache for a module and all modules that depend on it
+   */
+  private invalidateCacheForModule(moduleName: string): void {
+    // Remove this module from cache
+    this.moduleCache.delete(moduleName)
+
+    // Find all modules that depend on this module and invalidate them too
+    const dependents = this.dependencyMap.get(moduleName)
+    if (dependents) {
+      for (const dependent of dependents) {
+        this.moduleCache.delete(dependent)
+      }
+    }
+  }
+
+  /**
+   * Track which modules this module depends on (for cache invalidation)
+   */
+  private trackDependencies(moduleName: string, moduleCode: string): void {
+    // Extract esm.do imports from the module code
+    const importRegex = /import\s+.*from\s*['"]esm\.do\/(@[^'"]+)['"]/g
+    let match
+
+    while ((match = importRegex.exec(moduleCode)) !== null) {
+      const dependency = match[1]
+      if (dependency) {
+        // Add this module as a dependent of the imported module
+        let dependents = this.dependencyMap.get(dependency)
+        if (!dependents) {
+          dependents = new Set()
+          this.dependencyMap.set(dependency, dependents)
+        }
+        dependents.add(moduleName)
+      }
     }
   }
 
@@ -597,23 +681,30 @@ export class ESM {
   }
 
   /**
-   * Run a module's script
-   * Supports both positional arguments (name, args) and options object ({ name, args, timeout, env })
+   * Run a module's script.
+   * @deprecated Positional arguments are deprecated. Use run({ name, args }) instead.
    */
+  async run(name: string, args?: Record<string, unknown>): Promise<RunResult>
+  /**
+   * Run a module's script.
+   * Supports options object ({ name, args, timeout, env }).
+   * Also supports inline module execution via options.module and options.script.
+   */
+  async run(options: RunOptions): Promise<RunResult>
   async run(nameOrOptions: string | RunOptions, args?: Record<string, unknown>): Promise<RunResult> {
     // Normalize arguments - support both positional and options object
     let name: string
     let runArgs: Record<string, unknown> | undefined
-    let _timeout: number | undefined
-    let _env: Record<string, string> | undefined
+    let inlineModule: string | undefined
+    let inlineScript: string | undefined
     const isOptionsObject = typeof nameOrOptions === 'object' && nameOrOptions !== null
 
     if (isOptionsObject) {
       // Options object format (CLI-aligned)
       name = nameOrOptions.name
       runArgs = nameOrOptions.args
-      _timeout = nameOrOptions.timeout
-      _env = nameOrOptions.env
+      inlineModule = nameOrOptions.module
+      inlineScript = nameOrOptions.script
     } else {
       // Positional arguments format (legacy)
       name = nameOrOptions
@@ -622,18 +713,41 @@ export class ESM {
 
     this.validateName(name)
 
-    const module = await this.storage.read(name)
-    if (!module) {
-      throw new ModuleNotFoundError(name)
+    // Determine module code and script to execute
+    let moduleCode: string
+    let scriptCode: string
+
+    if (inlineModule) {
+      // Inline module mode - use provided module and script
+      moduleCode = inlineModule
+      scriptCode = inlineScript || ''
+
+      // Track dependencies for inline modules too
+      if (this.hasEsmDoImports(moduleCode)) {
+        this.trackDependencies(name, moduleCode)
+      }
+    } else {
+      // Storage mode - read from storage
+      const module = await this.storage.read(name)
+      if (!module) {
+        throw new ModuleNotFoundError(name)
+      }
+
+      if (!module.script || module.script.trim() === '') {
+        throw new ValidationError(`Module ${name} has no script`, { name, field: 'script' })
+      }
+
+      moduleCode = module.module
+      scriptCode = module.script
     }
 
-    if (!module.script || module.script.trim() === '') {
+    if (!scriptCode || scriptCode.trim() === '') {
       throw new ValidationError(`Module ${name} has no script`, { name, field: 'script' })
     }
 
     // Use sandboxed script execution with dependency resolution
     try {
-      const result = await this.executeScriptSandboxed(module.module, module.script, runArgs, name)
+      const result = await this.executeScriptSandboxed(moduleCode, scriptCode, runArgs, name)
       // Convert logs string to array format for CLI alignment
       const logsArray = result.logs ? result.logs.split('\n').filter(l => l.length > 0) : []
       return {
@@ -642,39 +756,42 @@ export class ESM {
         errors: [],
         exitCode: 0,
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // In CLI mode (options object), return error result
       // In legacy mode (positional args), throw for backward compatibility
-      const errorMessage = error instanceof Error ? error.message : String(error)
+      const err = error instanceof Error ? error : new Error(String(error))
       if (isOptionsObject) {
+        this.logger?.error('Script execution failed', err, { name })
         return {
           value: undefined,
           logs: [],
-          errors: [errorMessage],
+          errors: [err.message],
           exitCode: 1,
         }
       }
       // Legacy mode: re-throw the error
-      throw error
+      throw err
     }
   }
 
   /**
-   * Run a module's tests
-   * Supports both positional argument (name) and options object ({ name, watch, coverage, filter })
+   * Run a module's tests.
+   * @deprecated Positional argument is deprecated. Use test({ name }) instead.
    */
+  async test(name: string): Promise<TestResult>
+  /**
+   * Run a module's tests.
+   * Supports options object ({ name, watch, coverage, filter }).
+   */
+  async test(options: TestOptions): Promise<TestResult>
   async test(nameOrOptions: string | TestOptions): Promise<TestResult> {
     // Normalize arguments - support both positional and options object
     let name: string
-    let _watch: boolean | undefined
-    let _coverage: boolean | undefined
     let filter: string | undefined
 
     if (typeof nameOrOptions === 'object' && nameOrOptions !== null) {
       // Options object format (CLI-aligned)
       name = nameOrOptions.name
-      _watch = nameOrOptions.watch
-      _coverage = nameOrOptions.coverage
       filter = nameOrOptions.filter
     } else {
       // Positional argument format (legacy)
@@ -880,14 +997,16 @@ export class ESM {
   private computeLCS(oldLines: string[], newLines: string[]): number[][] {
     const m = oldLines.length
     const n = newLines.length
-    const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0))
+    const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0) as number[])
 
     for (let i = 1; i <= m; i++) {
       for (let j = 1; j <= n; j++) {
-        if (oldLines[i - 1] === newLines[j - 1]) {
-          dp[i][j] = dp[i - 1][j - 1] + 1
-        } else {
-          dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1])
+        const dpRow = dp[i]
+        const dpPrevRow = dp[i - 1]
+        if (dpRow && dpPrevRow && oldLines[i - 1] === newLines[j - 1]) {
+          dpRow[j] = (dpPrevRow[j - 1] ?? 0) + 1
+        } else if (dpRow && dpPrevRow) {
+          dpRow[j] = Math.max(dpPrevRow[j] ?? 0, dpRow[j - 1] ?? 0)
         }
       }
     }
@@ -915,7 +1034,7 @@ export class ESM {
         diffOps.unshift({ type: 'equal', oldIdx: i - 1, newIdx: j - 1 })
         i--
         j--
-      } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      } else if (j > 0 && (i === 0 || (dp[i]?.[j - 1] ?? 0) >= (dp[i - 1]?.[j] ?? 0))) {
         diffOps.unshift({ type: 'insert', newIdx: j - 1 })
         j--
       } else {
@@ -932,6 +1051,7 @@ export class ESM {
 
     for (let opIdx = 0; opIdx < diffOps.length; opIdx++) {
       const op = diffOps[opIdx]
+      if (!op) continue
 
       if (op.type !== 'equal') {
         // Start a new hunk or extend the current one
@@ -949,7 +1069,7 @@ export class ESM {
           // Add context before
           for (let c = contextStart; c < opIdx; c++) {
             const ctxOp = diffOps[c]
-            if (ctxOp.type === 'equal' && ctxOp.oldIdx !== undefined) {
+            if (ctxOp && ctxOp.type === 'equal' && ctxOp.oldIdx !== undefined) {
               currentHunk.lines.push(` ${oldLines[ctxOp.oldIdx]}`)
               currentHunk.oldCount++
               currentHunk.newCount++
@@ -972,7 +1092,7 @@ export class ESM {
         if (currentHunk) {
           // Check if we should close the hunk
           let nextChangeIdx = opIdx + 1
-          while (nextChangeIdx < diffOps.length && diffOps[nextChangeIdx].type === 'equal') {
+          while (nextChangeIdx < diffOps.length && diffOps[nextChangeIdx]?.type === 'equal') {
             nextChangeIdx++
           }
 
@@ -982,7 +1102,7 @@ export class ESM {
             const contextEnd = Math.min(opIdx + contextLines, diffOps.length)
             for (let c = opIdx; c < contextEnd; c++) {
               const ctxOp = diffOps[c]
-              if (ctxOp.type === 'equal' && ctxOp.oldIdx !== undefined) {
+              if (ctxOp && ctxOp.type === 'equal' && ctxOp.oldIdx !== undefined) {
                 currentHunk.lines.push(` ${oldLines[ctxOp.oldIdx]}`)
                 currentHunk.oldCount++
                 currentHunk.newCount++

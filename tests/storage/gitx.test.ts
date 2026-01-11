@@ -514,8 +514,8 @@ describe('GitxStorage', () => {
 
       const versions = await storage.versions(moduleName)
 
-      expect(versions[0].hash).toBe(v2)
-      expect(versions[1].hash).toBe(v1)
+      expect(versions[0]?.version).toBe(v2)
+      expect(versions[1]?.version).toBe(v1)
     })
 
     it('should include commit metadata in version info', async () => {
@@ -531,10 +531,10 @@ describe('GitxStorage', () => {
 
       const versions = await storage.versions(moduleName)
 
-      expect(versions[0]).toHaveProperty('hash')
+      expect(versions[0]).toHaveProperty('version')
       expect(versions[0]).toHaveProperty('message')
       expect(versions[0]).toHaveProperty('timestamp')
-      expect(typeof versions[0].timestamp).toBe('number')
+      expect(versions[0]?.timestamp).toBeInstanceOf(Date)
     })
 
     it('should return empty array for non-existent module', async () => {
