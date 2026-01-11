@@ -1,0 +1,116 @@
+# Docker Compose for esm.do with Nginx reverse proxy
+# Usage: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # Nginx reverse proxy
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: esm-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Configuration
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./sites-available:/etc/nginx/sites-available:ro
+      - ./conf.d:/etc/nginx/conf.d:ro
+      # SSL certificates
+      - ./ssl:/etc/nginx/ssl:ro
+      # Let's Encrypt webroot
+      - certbot-webroot:/var/www/certbot:ro
+      # Cache directory
+      - nginx-cache:/var/cache/nginx
+      # Logs
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      - worker
+    networks:
+      - esm-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # esm.do worker (Cloudflare Workers runtime or Miniflare)
+  worker:
+    image: node:20-alpine
+    container_name: esm-worker
+    restart: unless-stopped
+    working_dir: /app
+    command: ["npx", "wrangler", "dev", "--local", "--port", "8787", "--host", "0.0.0.0"]
+    volumes:
+      - ../../:/app:ro
+      - worker-cache:/app/.wrangler
+    environment:
+      - NODE_ENV=production
+    expose:
+      - "8787"
+    networks:
+      - esm-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Certbot for SSL certificate management
+  certbot:
+    image: certbot/certbot:latest
+    container_name: esm-certbot
+    volumes:
+      - ./ssl:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - esm-network
+    profiles:
+      - ssl
+
+  # Log rotation and management (optional)
+  logrotate:
+    image: blacklabelops/logrotate:latest
+    container_name: esm-logrotate
+    restart: unless-stopped
+    volumes:
+      - nginx-logs:/var/log/nginx
+    environment:
+      - LOGS_DIRECTORIES=/var/log/nginx
+      - LOGROTATE_SIZE=100M
+      - LOGROTATE_CRONSCHEDULE=0 0 * * *
+    profiles:
+      - logging
+
+networks:
+  esm-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  nginx-cache:
+    driver: local
+  nginx-logs:
+    driver: local
+  certbot-webroot:
+    driver: local
+  worker-cache:
+    driver: local

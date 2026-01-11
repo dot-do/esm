@@ -32,10 +32,18 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test --config tests/e2e/playwright.config.ts",
+    "test:e2e:ui": "playwright test --config tests/e2e/playwright.config.ts --ui",
     "typecheck": "npm run build:core && tsc --noEmit",
     "lint": "eslint src --ext .ts",
     "bun:dev": "bun run --hot deploy/bun/server.ts",
-    "bun:build": "bun run deploy/bun/build.ts"
+    "bun:build": "bun run deploy/bun/build.ts",
+    "release": "tsx scripts/release.ts",
+    "changelog": "tsx scripts/changelog.ts",
+    "version:check": "tsx scripts/version-check.ts",
+    "changeset": "changeset",
+    "changeset:version": "changeset version",
+    "changeset:publish": "changeset publish"
   },
   "keywords": [
     "esm",
@@ -66,9 +74,13 @@
     "commander": "^12.1.0"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.5.0",
+    "@changesets/cli": "^2.27.0",
     "@cloudflare/workers-types": "^4.20241218.0",
+    "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.2",
     "miniflare": "^4.20251217.0",
+    "tsx": "^4.7.0",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
     "wrangler": "^3.99.0"
