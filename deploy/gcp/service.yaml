@@ -1,0 +1,99 @@
+# Cloud Run Service Definition for esm.do
+# Deploy with: gcloud run services replace deploy/gcp/service.yaml --region=REGION
+#
+# This is a declarative configuration for the Cloud Run service.
+# Replace PROJECT_ID and REGION with your values before deploying.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: esm-do
+  labels:
+    app: esm-do
+    managed-by: gcloud
+  annotations:
+    # Description for the service
+    run.googleapis.com/description: "esm.do - Living ESM module system for AI agents"
+    # Ingress settings - allow all traffic
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scaling configuration
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+
+        # CPU allocation - allocate CPU only during request processing
+        run.googleapis.com/cpu-throttling: "true"
+
+        # Startup CPU boost for faster cold starts
+        run.googleapis.com/startup-cpu-boost: "true"
+
+        # Execution environment (gen2 for better performance)
+        run.googleapis.com/execution-environment: gen2
+
+    spec:
+      # Maximum concurrent requests per container instance
+      containerConcurrency: 80
+
+      # Request timeout (5 minutes)
+      timeoutSeconds: 300
+
+      # Service account (optional - uncomment and set)
+      # serviceAccountName: esm-do@PROJECT_ID.iam.gserviceaccount.com
+
+      containers:
+        - name: esm-do
+          # Image will be replaced during deployment
+          # Use: REGION-docker.pkg.dev/PROJECT_ID/esm-do/esm-do:TAG
+          image: us-central1-docker.pkg.dev/PROJECT_ID/esm-do/esm-do:latest
+
+          # Port configuration (Cloud Run sets PORT env var)
+          ports:
+            - name: http1
+              containerPort: 8080
+
+          # Resource limits
+          resources:
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+
+          # Environment variables
+          env:
+            - name: NODE_ENV
+              value: "production"
+            # Cloud Run automatically sets PORT=8080
+
+            # Optional: Add secrets from Secret Manager
+            # - name: API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: esm-do-api-key
+            #       key: latest
+
+          # Startup probe - check if container is ready to accept traffic
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+
+          # Liveness probe - check if container is still healthy
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+  # Traffic routing - all traffic to latest revision
+  traffic:
+    - percent: 100
+      latestRevision: true
