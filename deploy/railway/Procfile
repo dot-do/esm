@@ -1,0 +1,11 @@
+# Procfile for esm.do on Railway
+# Defines process types for the application
+
+# Main web process - runs the Cloudflare Worker via Miniflare
+web: npx miniflare --host 0.0.0.0 --port ${PORT:-8787} --modules src/worker/index.ts
+
+# Worker process for background tasks (optional)
+# worker: node dist/worker/background.js
+
+# Release process - runs before deployment (optional)
+# release: pnpm run migrate

@@ -1,0 +1,24 @@
+# Nixpacks configuration for esm.do on Railway
+# Alternative to Docker deployment using Nixpacks builder
+
+[phases.setup]
+nixPkgs = ["nodejs_20", "pnpm"]
+
+[phases.install]
+cmds = [
+    "corepack enable",
+    "pnpm install --frozen-lockfile"
+]
+
+[phases.build]
+cmds = [
+    "pnpm run build"
+]
+
+[start]
+cmd = "npx miniflare --host 0.0.0.0 --port ${PORT:-8787} --modules src/worker/index.ts"
+
+[variables]
+NODE_ENV = "production"
+PORT = "8787"
+MINIFLARE_LOG_LEVEL = "info"

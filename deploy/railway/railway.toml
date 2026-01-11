@@ -1,0 +1,28 @@
+# Railway deployment configuration for esm.do
+# Cloudflare Workers-based ESM module system
+
+[build]
+# Build command - compile TypeScript and prepare for miniflare
+builder = "dockerfile"
+dockerfilePath = "deploy/railway/Dockerfile"
+
+[deploy]
+# Number of replicas
+numReplicas = 1
+
+# Health check configuration
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+[service]
+# Internal port the service runs on
+internalPort = 8787
+
+[variables]
+# Environment variables for the worker
+NODE_ENV = "production"
+PORT = "8787"
+# Cloudflare Workers compatibility
+MINIFLARE_LOG_LEVEL = "info"

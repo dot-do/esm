@@ -1,0 +1,19 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "FUNCTIONS_NODE_BLOCK_ON_ENTRY_POINT_ERROR": "true",
+    "NODE_ENV": "development",
+    "ESM_DO_BASE_URL": "http://localhost:7071",
+    "ESM_DO_STORAGE_TYPE": "memory",
+    "ESM_DO_ENABLE_UNSAFE_EVAL": "true",
+    "ESM_DO_RATE_LIMIT_READ": "500",
+    "ESM_DO_RATE_LIMIT_WRITE": "100"
+  },
+  "Host": {
+    "LocalHttpPort": 7071,
+    "CORS": "*",
+    "CORSCredentials": false
+  }
+}

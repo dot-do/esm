@@ -1,0 +1,37 @@
+{
+  "name": "esm-do-azure-functions",
+  "version": "0.0.1",
+  "description": "Azure Functions deployment for esm.do module system",
+  "main": "dist/api/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "start": "func start",
+    "dev": "npm run build && func start --typescript",
+    "test": "npm run build && func start --port 7072 &",
+    "clean": "rm -rf dist",
+    "prestart": "npm run build",
+    "deploy": "./deploy.sh"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0",
+    "esm.do": "file:../.."
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "azure-functions-core-tools": "^4.0.5700",
+    "typescript": "^5.7.2"
+  },
+  "keywords": [
+    "azure-functions",
+    "serverless",
+    "esm",
+    "modules"
+  ],
+  "author": "dot-do",
+  "license": "MIT"
+}
