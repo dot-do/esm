@@ -1,0 +1,9 @@
+{
+  "title": "CLI",
+  "pages": [
+    "README",
+    "commands",
+    "configuration",
+    "workflows"
+  ]
+}

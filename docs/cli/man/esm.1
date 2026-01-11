@@ -1,0 +1,304 @@
+.\" Man page for esm.do CLI
+.\" Contact support@esm.do for errors or questions
+.TH ESM 1 "January 2025" "esm.do 0.0.1" "User Commands"
+.SH NAME
+esm \- Living ESM module management for AI agents
+.SH SYNOPSIS
+.B esm
+.I command
+.RI [ options ]
+.RI [ arguments ]
+.SH DESCRIPTION
+.B esm
+is a command-line interface for managing ESM modules on esm.do.
+It allows you to create, read, write, test, and run modules
+with full version control and sandboxed execution.
+.PP
+Every module consists of four synchronized files:
+.IP \(bu 2
+.B index.d.ts
+\- TypeScript type definitions
+.IP \(bu 2
+.B index.mjs
+\- ESM module implementation
+.IP \(bu 2
+.B index.test.js
+\- Vitest-compatible tests
+.IP \(bu 2
+.B index.script.js
+\- Executable script
+.SH COMMANDS
+.SS "Module Management"
+.TP
+.B init \fIname\fP
+Initialize a new module with the given name.
+Names must be in @scope/name format.
+.TP
+.B write \fIname\fP
+Write content to a module. Creates the module if it doesn't exist.
+.TP
+.B read \fIname\fP
+Read the content of a module.
+.TP
+.B delete \fIname\fP
+Delete a module (requires \-\-force flag).
+.SS "Execution"
+.TP
+.B run \fIname\fP
+Execute the module's script in a sandboxed environment.
+.TP
+.B test \fIname\fP
+Run the module's tests using the built-in test framework.
+.SS "Version Control"
+.TP
+.B versions \fIname\fP
+List version history for a module.
+.TP
+.B log \fIname\fP
+Show commit history for a module.
+.TP
+.B diff \fIname\fP \fIv1\fP [\fIv2\fP]
+Compare two versions of a module.
+.SS "Authentication"
+.TP
+.B login
+Authenticate with esm.do.
+.TP
+.B logout
+Log out and remove stored credentials.
+.TP
+.B whoami
+Display the current authenticated user.
+.SS "Configuration"
+.TP
+.B config get \fIkey\fP
+Get a configuration value.
+.TP
+.B config set \fIkey\fP \fIvalue\fP
+Set a configuration value.
+.TP
+.B config list
+List all configuration values.
+.SH OPTIONS
+.SS "Global Options"
+.TP
+.BR \-h ", " \-\-help
+Show help for the command.
+.TP
+.BR \-V ", " \-\-version
+Show the CLI version.
+.SS "init Options"
+.TP
+.BR \-t ", " \-\-template " " \fItemplate\fP
+Template to use (default, typescript). Default: default
+.SS "write Options"
+.TP
+.BR \-f ", " \-\-file " " \fIpath\fP
+Read module code from file.
+.TP
+.BR \-c ", " \-\-content " " \fIcontent\fP
+Module code as string.
+.TP
+.BR \-m ", " \-\-message " " \fImessage\fP
+Commit message.
+.TP
+.B \-\-stdin
+Read content from stdin.
+.TP
+.B \-\-types \fItypes\fP
+TypeScript type definitions.
+.TP
+.B \-\-module \fImodule\fP
+Module code (JavaScript).
+.TP
+.B \-\-tests \fItests\fP
+Test code.
+.TP
+.B \-\-script \fIscript\fP
+Executable script.
+.SS "read Options"
+.TP
+.BR \-v ", " \-\-version " " \fIversion\fP
+Read specific version by hash.
+.TP
+.BR \-o ", " \-\-output " " \fIfile\fP
+Write output to file.
+.TP
+.BR \-j ", " \-\-json
+Output as JSON (includes all components).
+.SS "run Options"
+.TP
+.BR \-t ", " \-\-timeout " " \fIms\fP
+Execution timeout in milliseconds. Default: 30000
+.TP
+.BR \-e ", " \-\-env " " \fIKEY=value\fP
+Environment variables (can be repeated).
+.SS "test Options"
+.TP
+.BR \-w ", " \-\-watch
+Watch mode (re-run on changes).
+.TP
+.BR \-c ", " \-\-coverage
+Collect coverage information.
+.TP
+.BR \-f ", " \-\-filter " " \fIpattern\fP
+Filter tests by name pattern.
+.SS "versions Options"
+.TP
+.BR \-l ", " \-\-limit " " \fIn\fP
+Maximum versions to show. Default: 10
+.TP
+.BR \-j ", " \-\-json
+Output as JSON.
+.TP
+.BR \-V ", " \-\-verbose
+Show detailed info (message, date).
+.SS "log Options"
+.TP
+.BR \-l ", " \-\-limit " " \fIn\fP
+Maximum entries to show. Default: 10
+.TP
+.BR \-j ", " \-\-json
+Output as JSON.
+.TP
+.BR \-V ", " \-\-verbose
+Show full commit details.
+.TP
+.BR \-s ", " \-\-since " " \fIdate\fP
+Show commits since date.
+.SS "diff Options"
+.TP
+.BR \-u ", " \-\-unified " " \fIn\fP
+Context lines in unified diff. Default: 3
+.TP
+.BR \-j ", " \-\-json
+Output as JSON.
+.SS "delete Options"
+.TP
+.BR \-f ", " \-\-force
+Skip confirmation prompt.
+.TP
+.BR \-d ", " \-\-dry\-run
+Show what would be deleted.
+.SS "login Options"
+.TP
+.BR \-t ", " \-\-token " " \fItoken\fP
+API token for authentication.
+.SH EXAMPLES
+.SS "Initialize a new module"
+.nf
+.RS
+esm init @myorg/calculator
+esm init @myorg/utils --template typescript
+.RE
+.fi
+.SS "Write module content"
+.nf
+.RS
+esm write @myorg/math --file ./math.js
+esm write @myorg/math --content "export const PI = 3.14159"
+esm write @myorg/math \\
+  --types "export declare function add(a: number, b: number): number" \\
+  --module "export function add(a, b) { return a + b }"
+.RE
+.fi
+.SS "Read module content"
+.nf
+.RS
+esm read @myorg/math
+esm read @myorg/math --json
+esm read @myorg/math --version abc123
+esm read @myorg/math --output ./local-math.js
+.RE
+.fi
+.SS "Run tests"
+.nf
+.RS
+esm test @myorg/math
+esm test @myorg/math --filter "add"
+esm test @myorg/math --coverage
+.RE
+.fi
+.SS "Execute scripts"
+.nf
+.RS
+esm run @myorg/calculator
+esm run @myorg/api-client --env API_KEY=abc123
+esm run @myorg/cli -- --input file.txt
+.RE
+.fi
+.SS "View history"
+.nf
+.RS
+esm versions @myorg/math
+esm log @myorg/math --verbose
+esm diff @myorg/math abc123 def456
+.RE
+.fi
+.SS "Authentication"
+.nf
+.RS
+esm login --token your-api-token
+esm whoami
+esm logout
+.RE
+.fi
+.SH ENVIRONMENT
+.TP
+.B ESM_TOKEN
+Authentication token (overrides config file).
+.TP
+.B ESM_API_ENDPOINT
+API base URL (overrides config file).
+.TP
+.B ESM_CONFIG_PATH
+Path to configuration file.
+.TP
+.B DEBUG
+Set to "esm:*" to enable debug output.
+.SH FILES
+.TP
+.I ~/.esm/config.json
+User configuration file containing API endpoint and authentication token.
+.SH EXIT STATUS
+.TP
+.B 0
+Command completed successfully.
+.TP
+.B 1
+An error occurred (module not found, tests failed, etc.).
+.SH MODULE NAMING
+Module names must be in scoped format: @scope/name
+.PP
+Examples of valid names:
+.IP \(bu 2
+@myorg/utils
+.IP \(bu 2
+@personal/calculator
+.IP \(bu 2
+@company/api/v2/client
+.PP
+The scope is typically an organization, username, or project name.
+Nested paths are allowed for organizing related modules.
+.SH SECURITY
+.TP
+.B Sandboxed Execution
+All module scripts and tests run in isolated V8 contexts
+with limited capabilities. Network access and file system
+access are restricted.
+.TP
+.B Token Security
+API tokens should be treated as secrets. Use environment
+variables in CI/CD pipelines and never commit tokens to
+version control.
+.SH SEE ALSO
+.BR npm (1),
+.BR node (1)
+.PP
+Full documentation: https://esm.do/docs/cli
+.SH BUGS
+Report bugs at https://github.com/dot-do/esm/issues
+.SH AUTHOR
+dot-do <support@esm.do>
+.SH COPYRIGHT
+Copyright (c) 2024-2025 dot-do. MIT License.
