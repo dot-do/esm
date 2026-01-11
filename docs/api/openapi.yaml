@@ -1,0 +1,895 @@
+openapi: 3.0.3
+info:
+  title: esm.do API
+  description: |
+    Living ESM module system for AI agents - types, modules, tests, and scripts in one place.
+
+    ## Overview
+
+    esm.do provides a platform for storing, testing, and executing ECMAScript modules.
+    Each module consists of four files:
+    - Type declarations (`.d.ts`)
+    - Module implementation (`.mjs`)
+    - Tests (`.test.js`)
+    - Executable script (`.script.js`)
+
+    ## Authentication
+
+    The API supports two authentication methods:
+    - **Bearer Token**: Include `Authorization: Bearer <token>` header
+    - **API Key**: Include `X-API-Key: <key>` header
+
+    Some endpoints are publicly accessible without authentication.
+  version: 0.0.1
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  contact:
+    name: esm.do Support
+    url: https://esm.do
+    email: support@esm.do
+
+servers:
+  - url: https://esm.do
+    description: Production server
+
+tags:
+  - name: Modules
+    description: Module CRUD operations
+  - name: Execution
+    description: Script and test execution
+  - name: Versions
+    description: Version history and comparison
+  - name: Discovery
+    description: Module listing and search
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+paths:
+  /{name}:
+    get:
+      tags:
+        - Modules
+      summary: Read module
+      description: Retrieve a module's metadata and file list
+      operationId: getModule
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+      responses:
+        '200':
+          description: Module found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModuleInfo'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security: []
+
+    put:
+      tags:
+        - Modules
+      summary: Create or update module
+      description: |
+        Create a new module or update an existing one.
+        Tests are automatically run before committing unless `force: true`.
+      operationId: writeModule
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WriteModuleRequest'
+      responses:
+        '201':
+          description: Module created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WriteModuleResponse'
+        '200':
+          description: Module updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WriteModuleResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: Tests failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      tags:
+        - Modules
+      summary: Delete module
+      description: Remove a module and all its versions
+      operationId: deleteModule
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+      responses:
+        '200':
+          description: Module deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteModuleResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /{name}.d.ts:
+    get:
+      tags:
+        - Modules
+      summary: Read type declarations
+      description: Get the TypeScript type declarations for a module
+      operationId: getTypes
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+        - $ref: '#/components/parameters/Version'
+      responses:
+        '200':
+          description: Type declarations
+          content:
+            application/typescript:
+              schema:
+                type: string
+          headers:
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security: []
+
+  /{name}.mjs:
+    get:
+      tags:
+        - Modules
+      summary: Read module implementation
+      description: Get the ESM module implementation
+      operationId: getModuleCode
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+        - $ref: '#/components/parameters/Version'
+      responses:
+        '200':
+          description: Module code
+          content:
+            application/javascript:
+              schema:
+                type: string
+          headers:
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security: []
+
+  /{name}.test.js:
+    get:
+      tags:
+        - Modules
+      summary: Read test code
+      description: Get the test code for a module
+      operationId: getTests
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+      responses:
+        '200':
+          description: Test code
+          content:
+            application/javascript:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security: []
+
+  /{name}.script.js:
+    get:
+      tags:
+        - Modules
+      summary: Read script
+      description: Get the executable script for a module
+      operationId: getScript
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+      responses:
+        '200':
+          description: Script code
+          content:
+            application/javascript:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security: []
+
+  /{name}@{version}:
+    get:
+      tags:
+        - Modules
+      summary: Read module at specific version
+      description: Retrieve a module at a specific version
+      operationId: getModuleVersion
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+        - name: version
+          in: path
+          required: true
+          description: Version hash
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Module found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModuleInfo'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security: []
+
+  /{name}/run:
+    post:
+      tags:
+        - Execution
+      summary: Execute module script
+      description: |
+        Execute a module's script with optional input arguments.
+        The script has access to all module exports and the `args` object.
+      operationId: runScript
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunScriptRequest'
+      responses:
+        '200':
+          description: Script executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunScriptResponse'
+        '400':
+          description: Module has no script
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          description: Script execution error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: Execution timeout
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /{name}/test:
+    post:
+      tags:
+        - Execution
+      summary: Run module tests
+      description: Execute a module's test suite
+      operationId: runTests
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunTestsRequest'
+      responses:
+        '200':
+          description: Tests executed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestResult'
+        '400':
+          description: Module has no tests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '504':
+          description: Test execution timeout
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /{name}/versions:
+    get:
+      tags:
+        - Versions
+      summary: List version history
+      description: Get the version history for a module
+      operationId: getVersions
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+        - name: limit
+          in: query
+          description: Maximum number of versions to return
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: Version history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionsResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security: []
+
+  /{name}/diff:
+    get:
+      tags:
+        - Versions
+      summary: Compare versions
+      description: Get a diff between two versions of a module
+      operationId: getDiff
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+        - name: from
+          in: query
+          required: true
+          description: Source version hash
+          schema:
+            type: string
+        - name: to
+          in: query
+          required: true
+          description: Target version hash
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Diff result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiffResponse'
+        '400':
+          description: Missing from/to parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security: []
+
+  /{name}/revert:
+    post:
+      tags:
+        - Versions
+      summary: Revert to version
+      description: Revert a module to a previous version
+      operationId: revertModule
+      parameters:
+        - $ref: '#/components/parameters/ModuleName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - to
+              properties:
+                to:
+                  type: string
+                  description: Target version to revert to
+      responses:
+        '200':
+          description: Module reverted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevertResponse'
+        '400':
+          description: Missing target version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /list:
+    get:
+      tags:
+        - Discovery
+      summary: List modules
+      description: List all modules or filter by pattern
+      operationId: listModules
+      parameters:
+        - name: pattern
+          in: query
+          description: Glob pattern to filter modules
+          schema:
+            type: string
+          examples:
+            all:
+              value: "*"
+              summary: All modules
+            scope:
+              value: "@math/*"
+              summary: Modules in @math scope
+            suffix:
+              value: "*-utils"
+              summary: Modules ending with -utils
+      responses:
+        '200':
+          description: Module list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListResponse'
+      security: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token authentication
+
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key authentication
+
+  parameters:
+    ModuleName:
+      name: name
+      in: path
+      required: true
+      description: Module name (e.g., @math/add)
+      schema:
+        type: string
+        pattern: '^@?[a-z0-9-]+(/[a-z0-9-]+)?$'
+      examples:
+        scoped:
+          value: "@math/add"
+          summary: Scoped module
+        unscoped:
+          value: "utils"
+          summary: Unscoped module
+
+    Version:
+      name: version
+      in: query
+      description: Specific version hash
+      schema:
+        type: string
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Module not found: @math/nonexistent"
+            code: "MODULE_NOT_FOUND"
+            status: 404
+
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Validation failed: types field is required"
+            code: "VALIDATION_ERROR"
+            status: 400
+
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Authentication required"
+            code: "UNAUTHORIZED"
+            status: 401
+
+  schemas:
+    Error:
+      type: object
+      required:
+        - error
+        - status
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+        code:
+          type: string
+          description: Machine-readable error code
+          enum:
+            - MODULE_NOT_FOUND
+            - VERSION_NOT_FOUND
+            - VALIDATION_ERROR
+            - TYPE_ERROR
+            - TEST_FAILURE
+            - SCRIPT_ERROR
+            - EXECUTION_ERROR
+            - STORAGE_ERROR
+            - CIRCULAR_DEPENDENCY
+            - TIMEOUT_ERROR
+            - RATE_LIMITED
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - INTERNAL_ERROR
+        status:
+          type: integer
+          description: HTTP status code
+        details:
+          type: object
+          description: Additional error details
+          additionalProperties: true
+
+    ModuleInfo:
+      type: object
+      required:
+        - name
+        - version
+        - files
+      properties:
+        name:
+          type: string
+          description: Module name
+          example: "@math/add"
+        version:
+          type: string
+          description: Current version hash
+          example: "a3f2dd1b7c4ee2"
+        files:
+          type: array
+          items:
+            type: string
+          description: Available files
+          example: ["index.d.ts", "index.mjs", "index.test.js", "index.script.js"]
+
+    WriteModuleRequest:
+      type: object
+      required:
+        - types
+        - module
+      properties:
+        types:
+          type: string
+          description: TypeScript type declarations
+          example: "export declare function add(a: number, b: number): number;"
+        module:
+          type: string
+          description: ESM module implementation
+          example: "export function add(a, b) { return a + b; }"
+        tests:
+          type: string
+          description: Vitest-compatible test code
+          example: "describe('add', () => { it('works', () => expect(add(1,2)).toBe(3)) })"
+        script:
+          type: string
+          description: Executable script
+          example: "return add(10, 20);"
+        options:
+          type: object
+          properties:
+            force:
+              type: boolean
+              description: Save even if tests fail
+              default: false
+            tag:
+              type: string
+              description: Create a version tag
+            commitMessage:
+              type: string
+              description: Custom commit message
+
+    WriteModuleResponse:
+      type: object
+      required:
+        - name
+        - version
+      properties:
+        name:
+          type: string
+          description: Module name
+        version:
+          type: string
+          description: New version hash
+        created:
+          type: boolean
+          description: True if module was created (new)
+        updated:
+          type: boolean
+          description: True if module was updated (existing)
+        warning:
+          type: string
+          description: Warning message (e.g., saved with failing tests)
+        testResults:
+          $ref: '#/components/schemas/TestResult'
+
+    DeleteModuleResponse:
+      type: object
+      required:
+        - deleted
+        - name
+      properties:
+        deleted:
+          type: boolean
+          description: Always true on success
+        name:
+          type: string
+          description: Deleted module name
+        commit:
+          type: object
+          properties:
+            sha:
+              type: string
+              description: Deletion commit hash
+            message:
+              type: string
+              description: Commit message
+
+    RunScriptRequest:
+      type: object
+      properties:
+        input:
+          type: object
+          additionalProperties: true
+          description: Arguments available as `args` in the script
+        timeout:
+          type: integer
+          description: Maximum execution time in milliseconds
+          default: 30000
+        version:
+          type: string
+          description: Specific version to run
+
+    RunScriptResponse:
+      type: object
+      required:
+        - result
+        - logs
+        - duration
+      properties:
+        result:
+          description: The return value of the script
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogEntry'
+          description: Captured console output
+        duration:
+          type: integer
+          description: Execution time in milliseconds
+
+    LogEntry:
+      type: object
+      required:
+        - level
+        - args
+      properties:
+        level:
+          type: string
+          enum: [log, warn, error, info, debug]
+          description: Log level
+        args:
+          type: array
+          items: {}
+          description: Arguments passed to console method
+
+    RunTestsRequest:
+      type: object
+      properties:
+        timeout:
+          type: integer
+          description: Maximum test execution time in milliseconds
+          default: 30000
+        filter:
+          type: string
+          description: Run only tests matching this pattern
+
+    TestResult:
+      type: object
+      required:
+        - passed
+        - failed
+        - total
+        - duration
+        - results
+      properties:
+        passed:
+          type: integer
+          description: Number of passing tests
+        failed:
+          type: integer
+          description: Number of failing tests
+        total:
+          type: integer
+          description: Total number of tests
+        duration:
+          type: integer
+          description: Total execution time in milliseconds
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/TestCaseResult'
+          description: Individual test results
+
+    TestCaseResult:
+      type: object
+      required:
+        - name
+        - status
+      properties:
+        name:
+          type: string
+          description: Test case name
+        status:
+          type: string
+          enum: [passed, failed]
+          description: Test result status
+        duration:
+          type: integer
+          description: Test execution time in milliseconds
+        error:
+          type: string
+          description: Error message if failed
+
+    VersionEntry:
+      type: object
+      required:
+        - sha
+        - message
+        - timestamp
+        - author
+      properties:
+        sha:
+          type: string
+          description: Version hash
+        message:
+          type: string
+          description: Commit message
+        timestamp:
+          type: string
+          format: date-time
+          description: When the version was created
+        author:
+          type: string
+          description: Author identifier
+        parent:
+          type: string
+          description: Parent version hash
+
+    VersionsResponse:
+      type: object
+      required:
+        - versions
+      properties:
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/VersionEntry'
+          description: Version history
+
+    DiffResponse:
+      type: object
+      required:
+        - diff
+      properties:
+        diff:
+          type: string
+          description: Unified diff output
+        files:
+          type: object
+          additionalProperties:
+            type: string
+          description: Per-file diffs
+        stats:
+          type: object
+          properties:
+            additions:
+              type: integer
+              description: Total lines added
+            deletions:
+              type: integer
+              description: Total lines removed
+            filesChanged:
+              type: integer
+              description: Number of files changed
+
+    RevertResponse:
+      type: object
+      required:
+        - reverted
+        - from
+        - to
+        - newVersion
+        - commit
+      properties:
+        reverted:
+          type: boolean
+          description: Always true on success
+        from:
+          type: string
+          description: Previous version hash
+        to:
+          type: string
+          description: Target version hash
+        newVersion:
+          type: string
+          description: New version hash after revert
+        commit:
+          type: object
+          required:
+            - message
+            - sha
+          properties:
+            message:
+              type: string
+              description: Revert commit message
+            sha:
+              type: string
+              description: Revert commit hash
+
+    ListResponse:
+      type: object
+      required:
+        - modules
+        - count
+      properties:
+        modules:
+          type: array
+          items:
+            type: string
+          description: List of module names
+        count:
+          type: integer
+          description: Total number of modules
