@@ -1,0 +1,81 @@
+# Fly.io configuration for esm.do
+# ESM module system for AI agents running on workerd
+
+app = "esm-do"
+primary_region = "iad"
+
+# Build configuration
+[build]
+dockerfile = "Dockerfile"
+
+# Environment variables
+[env]
+NODE_ENV = "production"
+PORT = "8787"
+# Workerd/Miniflare configuration
+MINIFLARE_LOG = "info"
+
+# HTTP service configuration
+[http_service]
+internal_port = 8787
+force_https = true
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 1
+processes = ["app"]
+
+# Health check configuration
+[[http_service.checks]]
+grace_period = "10s"
+interval = "30s"
+method = "GET"
+path = "/health"
+port = 8787
+timeout = "5s"
+
+# Multi-region scaling
+# Primary: US East (IAD - Ashburn, Virginia)
+# Secondary regions for global distribution
+[[vm]]
+memory = "512mb"
+cpu_kind = "shared"
+cpus = 1
+
+# Scaling configuration
+[deploy]
+strategy = "rolling"
+
+# Machine configuration
+[[services]]
+protocol = "tcp"
+internal_port = 8787
+
+[[services.ports]]
+port = 80
+handlers = ["http"]
+
+[[services.ports]]
+port = 443
+handlers = ["tls", "http"]
+
+# TCP health checks for services
+[[services.tcp_checks]]
+grace_period = "10s"
+interval = "30s"
+timeout = "5s"
+
+# Concurrency limits
+[services.concurrency]
+type = "requests"
+soft_limit = 200
+hard_limit = 250
+
+# Metrics configuration
+[metrics]
+port = 9091
+path = "/metrics"
+
+# Statics configuration (if needed for assets)
+# [[statics]]
+# guest_path = "/app/public"
+# url_prefix = "/static"

@@ -1,0 +1,65 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Dependencies - will be installed fresh
+node_modules
+
+# Build outputs - will be rebuilt
+dist
+core/dist
+*.tsbuildinfo
+
+# IDE and editor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test and development files
+tests
+*.test.ts
+*.spec.ts
+vitest.config.ts
+coverage
+
+# Documentation
+*.md
+!README.md
+docs
+
+# Wrangler local files
+.wrangler
+.dev.vars
+
+# Beads issue tracker
+.beads
+
+# Claude Code
+.claude
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Environment files with secrets
+.env
+.env.*
+!.env.example
+
+# Deployment configs (except fly)
+deploy/cloudflare
+deploy/aws
+deploy/gcp
+
+# Temporary files
+tmp
+temp
+*.tmp
