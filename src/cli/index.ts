@@ -11,10 +11,11 @@
 
 import { Command } from 'commander'
 import { ESM } from '../esm.js'
-import { existsSync, readFileSync, watch as fsWatch, writeFileSync } from 'fs'
-import { dirname, join, resolve } from 'path'
-import { homedir, platform } from 'os'
-import { execSync, spawn } from 'child_process'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch as fsWatch, writeFileSync } from 'fs'
+import { basename, dirname, join, resolve } from 'path'
+import { homedir, platform, release, type } from 'os'
+import { createHash } from 'crypto'
+import { execSync, spawn, spawnSync } from 'child_process'
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { fileURLToPath } from 'url'
 
@@ -954,6 +955,628 @@ program
         }
         process.exit(1)
       })
+    }
+  })
+
+// ============================================================================
+// deploy command
+// ============================================================================
+
+/**
+ * Check if a CLI tool is installed
+ */
+function checkToolInstalled(tool: string): boolean {
+  try {
+    execSync(`which ${tool}`, { stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Run a shell command with progress output
+ */
+function runDeployCommand(
+  command: string,
+  args: string[],
+  options: { cwd?: string; env?: Record<string, string> } = {}
+): Promise<{ success: boolean; output: string; error?: string }> {
+  return new Promise((resolve) => {
+    const cwd = options.cwd || process.cwd()
+    const env = { ...process.env, ...options.env }
+
+    console.log(formatInfo(`Running: ${command} ${args.join(' ')}`))
+
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      stdio: ['inherit', 'pipe', 'pipe'],
+      shell: true,
+    })
+
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout?.on('data', (data: Buffer) => {
+      const text = data.toString()
+      stdout += text
+      process.stdout.write(text)
+    })
+
+    child.stderr?.on('data', (data: Buffer) => {
+      const text = data.toString()
+      stderr += text
+      process.stderr.write(text)
+    })
+
+    child.on('close', (code: number | null) => {
+      if (code === 0) {
+        resolve({ success: true, output: stdout })
+      } else {
+        resolve({ success: false, output: stdout, error: stderr })
+      }
+    })
+
+    child.on('error', (err: Error) => {
+      resolve({ success: false, output: '', error: err.message })
+    })
+  })
+}
+
+/**
+ * Get the project root directory
+ */
+function getProjectRoot(): string {
+  // Walk up from current directory to find package.json
+  let dir = process.cwd()
+
+  while (dir !== dirname(dir)) {
+    if (existsSync(join(dir, 'package.json'))) {
+      return dir
+    }
+    dir = dirname(dir)
+  }
+  return process.cwd()
+}
+
+const deployCmd = program
+  .command('deploy')
+  .description('Deploy esm.do to various platforms')
+  .addHelpText(
+    'after',
+    `
+Platforms:
+  cloudflare (cf)   Deploy to Cloudflare Workers
+  fly               Deploy to fly.io
+  vercel            Deploy to Vercel
+  docker            Build and push Docker image
+  railway           Deploy to Railway
+  render            Deploy to Render
+  aws               Deploy to AWS Lambda
+  gcp               Deploy to Google Cloud Run
+  azure             Deploy to Azure Functions
+
+Examples:
+  esm deploy cloudflare
+  esm deploy cf --env staging
+  esm deploy docker --tag v1.0.0 --registry ghcr.io/myorg
+  esm deploy fly --region lax`
+  )
+
+// Cloudflare Workers
+deployCmd
+  .command('cloudflare')
+  .alias('cf')
+  .description('Deploy to Cloudflare Workers')
+  .option('--env <env>', 'Environment (production, staging)', 'production')
+  .option('--dry-run', 'Show what would be deployed without deploying')
+  .action(async (options: { env: string; dryRun?: boolean }) => {
+    try {
+      console.log(formatHeader('Deploying to Cloudflare Workers...'))
+
+      // Check for wrangler
+      const hasWrangler = checkToolInstalled('wrangler')
+      if (!hasWrangler) {
+        // Try npx wrangler
+        console.log(formatInfo('wrangler not found globally, using npx...'))
+      }
+
+      const projectRoot = getProjectRoot()
+      const command = hasWrangler ? 'wrangler' : 'npx'
+      const baseArgs = hasWrangler ? [] : ['wrangler']
+
+      const args = [
+        ...baseArgs,
+        'deploy',
+        ...(options.env !== 'production' ? ['--env', options.env] : []),
+        ...(options.dryRun ? ['--dry-run'] : []),
+      ]
+
+      const result = await runDeployCommand(command, args, { cwd: projectRoot })
+
+      if (result.success) {
+        console.log(formatSuccess('Successfully deployed to Cloudflare Workers!'))
+      } else {
+        console.error(formatError('Deployment failed'))
+        if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// Fly.io
+deployCmd
+  .command('fly')
+  .description('Deploy to fly.io')
+  .option('--region <region>', 'Primary region (e.g., lax, iad, cdg)')
+  .option('--app <app>', 'Fly app name')
+  .option('--config <config>', 'Path to fly.toml config file')
+  .action(async (options: { region?: string; app?: string; config?: string }) => {
+    try {
+      console.log(formatHeader('Deploying to fly.io...'))
+
+      // Check for fly CLI
+      const hasFly = checkToolInstalled('fly') || checkToolInstalled('flyctl')
+      if (!hasFly) {
+        console.error(formatError('fly CLI not found. Install it from: https://fly.io/docs/hands-on/install-flyctl/'))
+        process.exit(1)
+      }
+
+      const projectRoot = getProjectRoot()
+      const flyConfigDir = join(projectRoot, 'deploy', 'fly')
+      const flyConfigPath = options.config || join(flyConfigDir, 'fly.toml')
+
+      // Check if fly.toml exists
+      if (!existsSync(flyConfigPath) && !options.config) {
+        console.log(formatInfo('No fly.toml found. You may need to run "fly launch" first.'))
+        console.log(formatInfo('Or create a fly.toml in deploy/fly/'))
+      }
+
+      const command = checkToolInstalled('fly') ? 'fly' : 'flyctl'
+      const args = [
+        'deploy',
+        ...(options.region ? ['--region', options.region] : []),
+        ...(options.app ? ['--app', options.app] : []),
+        ...(existsSync(flyConfigPath) ? ['--config', flyConfigPath] : []),
+      ]
+
+      const result = await runDeployCommand(command, args, { cwd: projectRoot })
+
+      if (result.success) {
+        console.log(formatSuccess('Successfully deployed to fly.io!'))
+      } else {
+        console.error(formatError('Deployment failed'))
+        if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// Vercel
+deployCmd
+  .command('vercel')
+  .description('Deploy to Vercel')
+  .option('--prod', 'Production deployment')
+  .option('--preview', 'Preview deployment')
+  .option('--config <config>', 'Path to vercel.json config file')
+  .action(async (options: { prod?: boolean; preview?: boolean; config?: string }) => {
+    try {
+      console.log(formatHeader('Deploying to Vercel...'))
+
+      // Check for vercel CLI
+      const hasVercel = checkToolInstalled('vercel')
+      if (!hasVercel) {
+        console.log(formatInfo('vercel CLI not found globally, using npx...'))
+      }
+
+      const projectRoot = getProjectRoot()
+      const vercelConfigDir = join(projectRoot, 'deploy', 'vercel')
+
+      const command = hasVercel ? 'vercel' : 'npx'
+      const baseArgs = hasVercel ? [] : ['vercel']
+
+      const args = [
+        ...baseArgs,
+        ...(options.prod ? ['--prod'] : []),
+        ...(options.preview ? ['--preview'] : []),
+      ]
+
+      // Set VERCEL_PROJECT_SETTINGS_PATH if config exists
+      const env: Record<string, string> = {}
+      const configPath = options.config || join(vercelConfigDir, 'vercel.json')
+      if (existsSync(configPath)) {
+        console.log(formatInfo(`Using config: ${configPath}`))
+      }
+
+      const result = await runDeployCommand(command, args, { cwd: projectRoot, env })
+
+      if (result.success) {
+        console.log(formatSuccess('Successfully deployed to Vercel!'))
+      } else {
+        console.error(formatError('Deployment failed'))
+        if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// Docker
+deployCmd
+  .command('docker')
+  .description('Build and push Docker image')
+  .option('-t, --tag <tag>', 'Image tag', 'latest')
+  .option('-r, --registry <registry>', 'Container registry (e.g., ghcr.io/myorg)')
+  .option('--push', 'Push image after building')
+  .option('--no-cache', 'Build without cache')
+  .option('-f, --dockerfile <dockerfile>', 'Path to Dockerfile')
+  .action(async (options: {
+    tag: string
+    registry?: string
+    push?: boolean
+    cache?: boolean
+    dockerfile?: string
+  }) => {
+    try {
+      console.log(formatHeader('Building Docker image...'))
+
+      // Check for docker
+      const hasDocker = checkToolInstalled('docker')
+      if (!hasDocker) {
+        console.error(formatError('docker CLI not found. Install Docker from: https://docs.docker.com/get-docker/'))
+        process.exit(1)
+      }
+
+      const projectRoot = getProjectRoot()
+      const dockerfile = options.dockerfile || join(projectRoot, 'deploy', 'docker', 'Dockerfile')
+
+      if (!existsSync(dockerfile)) {
+        console.error(formatError(`Dockerfile not found at: ${dockerfile}`))
+        process.exit(1)
+      }
+
+      // Build image name
+      const imageName = options.registry
+        ? `${options.registry}/esm-do:${options.tag}`
+        : `esm-do:${options.tag}`
+
+      console.log(formatInfo(`Building image: ${imageName}`))
+
+      const buildArgs = [
+        'build',
+        '-f', dockerfile,
+        '-t', imageName,
+        ...(options.cache === false ? ['--no-cache'] : []),
+        '.',
+      ]
+
+      const buildResult = await runDeployCommand('docker', buildArgs, { cwd: projectRoot })
+
+      if (!buildResult.success) {
+        console.error(formatError('Docker build failed'))
+        if (buildResult.error) console.error(buildResult.error)
+        process.exit(1)
+      }
+
+      console.log(formatSuccess(`Successfully built: ${imageName}`))
+
+      // Push if requested
+      if (options.push) {
+        if (!options.registry) {
+          console.error(formatError('--registry is required when using --push'))
+          process.exit(1)
+        }
+
+        console.log(formatInfo(`Pushing image: ${imageName}`))
+        const pushResult = await runDeployCommand('docker', ['push', imageName], { cwd: projectRoot })
+
+        if (!pushResult.success) {
+          console.error(formatError('Docker push failed'))
+          if (pushResult.error) console.error(pushResult.error)
+          process.exit(1)
+        }
+
+        console.log(formatSuccess(`Successfully pushed: ${imageName}`))
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// Railway
+deployCmd
+  .command('railway')
+  .description('Deploy to Railway')
+  .option('--service <service>', 'Railway service name')
+  .option('--environment <env>', 'Environment (production, staging)')
+  .action(async (options: { service?: string; environment?: string }) => {
+    try {
+      console.log(formatHeader('Deploying to Railway...'))
+
+      // Check for railway CLI
+      const hasRailway = checkToolInstalled('railway')
+      if (!hasRailway) {
+        console.log(formatInfo('railway CLI not found globally, using npx...'))
+      }
+
+      const projectRoot = getProjectRoot()
+      const railwayConfigPath = join(projectRoot, 'deploy', 'railway', 'railway.toml')
+
+      if (existsSync(railwayConfigPath)) {
+        console.log(formatInfo(`Using config: ${railwayConfigPath}`))
+      }
+
+      const command = hasRailway ? 'railway' : 'npx'
+      const baseArgs = hasRailway ? [] : ['@railway/cli']
+
+      const args = [
+        ...baseArgs,
+        'up',
+        ...(options.service ? ['--service', options.service] : []),
+        ...(options.environment ? ['--environment', options.environment] : []),
+      ]
+
+      const result = await runDeployCommand(command, args, { cwd: projectRoot })
+
+      if (result.success) {
+        console.log(formatSuccess('Successfully deployed to Railway!'))
+      } else {
+        console.error(formatError('Deployment failed'))
+        if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// Render
+deployCmd
+  .command('render')
+  .description('Deploy to Render')
+  .option('--service-id <id>', 'Render service ID')
+  .action(async (options: { serviceId?: string }) => {
+    try {
+      console.log(formatHeader('Deploying to Render...'))
+
+      // Check for render CLI (render-cli)
+      const hasRender = checkToolInstalled('render')
+      if (!hasRender) {
+        console.log(formatInfo('Render deployments are typically triggered via:'))
+        console.log(formatInfo('  1. Git push (auto-deploy)'))
+        console.log(formatInfo('  2. Render Dashboard'))
+        console.log(formatInfo('  3. Render API'))
+        console.log('')
+
+        if (options.serviceId) {
+          console.log(formatInfo('Triggering deploy via API...'))
+          // Note: This would require RENDER_API_KEY to be set
+          const config = loadConfig()
+          const apiKey = config['render.api_key'] || process.env.RENDER_API_KEY
+
+          if (!apiKey) {
+            console.error(formatError('RENDER_API_KEY not set. Use: esm config set render.api_key <key>'))
+            process.exit(1)
+          }
+
+          // Use curl to trigger deploy
+          const result = await runDeployCommand('curl', [
+            '-X', 'POST',
+            '-H', `Authorization: Bearer ${apiKey}`,
+            `https://api.render.com/v1/services/${options.serviceId}/deploys`,
+          ])
+
+          if (result.success) {
+            console.log(formatSuccess('Deploy triggered on Render!'))
+          } else {
+            console.error(formatError('Failed to trigger deploy'))
+            process.exit(1)
+          }
+        } else {
+          console.log(formatInfo('Use --service-id to trigger a deploy via API'))
+          console.log(formatInfo('Or push to your connected git repository'))
+        }
+        return
+      }
+
+      const projectRoot = getProjectRoot()
+      const args = ['deploy', ...(options.serviceId ? ['--service', options.serviceId] : [])]
+
+      const result = await runDeployCommand('render', args, { cwd: projectRoot })
+
+      if (result.success) {
+        console.log(formatSuccess('Successfully deployed to Render!'))
+      } else {
+        console.error(formatError('Deployment failed'))
+        if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// AWS Lambda / SAM
+deployCmd
+  .command('aws')
+  .description('Deploy to AWS Lambda')
+  .option('--stack-name <name>', 'CloudFormation stack name', 'esm-do')
+  .option('--region <region>', 'AWS region', 'us-east-1')
+  .option('--profile <profile>', 'AWS profile')
+  .option('--guided', 'Run guided deployment')
+  .action(async (options: {
+    stackName: string
+    region: string
+    profile?: string
+    guided?: boolean
+  }) => {
+    try {
+      console.log(formatHeader('Deploying to AWS...'))
+
+      // Check for SAM CLI
+      const hasSam = checkToolInstalled('sam')
+      if (!hasSam) {
+        console.error(formatError('AWS SAM CLI not found. Install it from: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html'))
+        process.exit(1)
+      }
+
+      const projectRoot = getProjectRoot()
+      const samConfigPath = join(projectRoot, 'deploy', 'aws', 'template.yaml')
+
+      if (!existsSync(samConfigPath)) {
+        console.log(formatInfo('No SAM template found in deploy/aws/template.yaml'))
+        console.log(formatInfo('You may need to create one or use --guided for initial setup'))
+      }
+
+      const args = [
+        'deploy',
+        '--stack-name', options.stackName,
+        '--region', options.region,
+        ...(options.profile ? ['--profile', options.profile] : []),
+        ...(options.guided ? ['--guided'] : ['--no-confirm-changeset', '--no-fail-on-empty-changeset']),
+        '--capabilities', 'CAPABILITY_IAM',
+      ]
+
+      const result = await runDeployCommand('sam', args, { cwd: projectRoot })
+
+      if (result.success) {
+        console.log(formatSuccess('Successfully deployed to AWS!'))
+      } else {
+        console.error(formatError('Deployment failed'))
+        if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// Google Cloud Run
+deployCmd
+  .command('gcp')
+  .description('Deploy to Google Cloud Run')
+  .option('--project <project>', 'GCP project ID')
+  .option('--region <region>', 'GCP region', 'us-central1')
+  .option('--service <service>', 'Cloud Run service name', 'esm-do')
+  .option('--allow-unauthenticated', 'Allow unauthenticated access')
+  .action(async (options: {
+    project?: string
+    region: string
+    service: string
+    allowUnauthenticated?: boolean
+  }) => {
+    try {
+      console.log(formatHeader('Deploying to Google Cloud Run...'))
+
+      // Check for gcloud CLI
+      const hasGcloud = checkToolInstalled('gcloud')
+      if (!hasGcloud) {
+        console.error(formatError('gcloud CLI not found. Install it from: https://cloud.google.com/sdk/docs/install'))
+        process.exit(1)
+      }
+
+      const projectRoot = getProjectRoot()
+
+      // Build and deploy using Cloud Build
+      const args = [
+        'run', 'deploy', options.service,
+        '--source', '.',
+        '--region', options.region,
+        ...(options.project ? ['--project', options.project] : []),
+        ...(options.allowUnauthenticated ? ['--allow-unauthenticated'] : []),
+      ]
+
+      const result = await runDeployCommand('gcloud', args, { cwd: projectRoot })
+
+      if (result.success) {
+        console.log(formatSuccess('Successfully deployed to Google Cloud Run!'))
+      } else {
+        console.error(formatError('Deployment failed'))
+        if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// Azure Functions
+deployCmd
+  .command('azure')
+  .description('Deploy to Azure Functions')
+  .option('--function-app <name>', 'Azure Function App name')
+  .option('--resource-group <rg>', 'Azure resource group')
+  .option('--subscription <sub>', 'Azure subscription ID')
+  .action(async (options: {
+    functionApp?: string
+    resourceGroup?: string
+    subscription?: string
+  }) => {
+    try {
+      console.log(formatHeader('Deploying to Azure Functions...'))
+
+      // Check for Azure CLI
+      const hasAz = checkToolInstalled('az')
+      if (!hasAz) {
+        console.error(formatError('Azure CLI (az) not found. Install it from: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli'))
+        process.exit(1)
+      }
+
+      // Check for Azure Functions Core Tools
+      const hasFunc = checkToolInstalled('func')
+      if (!hasFunc) {
+        console.error(formatError('Azure Functions Core Tools (func) not found. Install it from: https://docs.microsoft.com/en-us/azure/azure-functions/functions-run-local'))
+        process.exit(1)
+      }
+
+      if (!options.functionApp) {
+        console.error(formatError('--function-app is required'))
+        process.exit(1)
+      }
+
+      const projectRoot = getProjectRoot()
+      const azureConfigDir = join(projectRoot, 'deploy', 'azure')
+
+      const args = [
+        'azure', 'functionapp', 'publish', options.functionApp,
+        ...(options.subscription ? ['--subscription', options.subscription] : []),
+      ]
+
+      const result = await runDeployCommand('func', args, { cwd: azureConfigDir })
+
+      if (result.success) {
+        console.log(formatSuccess('Successfully deployed to Azure Functions!'))
+      } else {
+        console.error(formatError('Deployment failed'))
+        if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
     }
   })
 
