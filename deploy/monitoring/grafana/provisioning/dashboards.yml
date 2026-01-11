@@ -1,0 +1,17 @@
+# Grafana Dashboard Provisioning for esm.do
+# https://esm.do - Living ESM module system for AI agents
+
+apiVersion: 1
+
+providers:
+  - name: "esm-do"
+    orgId: 1
+    folder: "esm.do"
+    folderUid: "esm-do"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

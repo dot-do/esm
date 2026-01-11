@@ -6,6 +6,8 @@
  * - CORS handling
  * - Authentication
  * - Security headers
+ * - Prometheus metrics collection
+ * - OpenTelemetry distributed tracing
  */
 
 // Chain utilities
@@ -46,3 +48,30 @@ export {
   getApiPreset,
   getRelaxedPreset,
 } from './security-headers.js'
+
+// Metrics middleware (Prometheus)
+export {
+  type MetricsConfig,
+  type Counter,
+  type Gauge,
+  type Histogram,
+  type MetricsRegistry,
+  type MetricsMiddleware,
+  createMetricsMiddleware,
+  createMetricsHandler,
+} from './metrics.js'
+
+// Tracing middleware (OpenTelemetry)
+export {
+  type TracingConfig,
+  type SpanContext,
+  type Span,
+  type SpanEvent,
+  type SpanStatus,
+  type TracingMiddleware,
+  type StartSpanOptions,
+  createTracingMiddleware,
+  createSpanContext,
+  isValidSpanContext,
+  isSampled,
+} from './tracing.js'

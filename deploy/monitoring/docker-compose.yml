@@ -1,0 +1,186 @@
+# Docker Compose for esm.do Monitoring Stack
+# https://esm.do - Living ESM module system for AI agents
+#
+# Usage:
+#   docker-compose -f deploy/monitoring/docker-compose.yml up -d
+#
+# Services:
+#   - Prometheus: http://localhost:9090
+#   - Grafana: http://localhost:3000 (admin/admin)
+#   - Jaeger: http://localhost:16686
+
+version: "3.8"
+
+services:
+  # Prometheus - Metrics collection and storage
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: esm-do-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--storage.tsdb.retention.size=5GB"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - esm-do-monitoring
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=9090"
+
+  # Grafana - Visualization and dashboards
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: esm-do-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-piechart-panel
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/esm-do-overview.json
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - esm-do-monitoring
+    depends_on:
+      - prometheus
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=3000"
+
+  # Jaeger - Distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    container_name: esm-do-jaeger
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+      - COLLECTOR_OTLP_ENABLED=true
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_VALUE=/badger/data
+      - BADGER_DIRECTORY_KEY=/badger/key
+    ports:
+      # Jaeger UI
+      - "16686:16686"
+      # Accept Jaeger thrift over compact (UDP)
+      - "6831:6831/udp"
+      # Accept Jaeger thrift over binary (UDP)
+      - "6832:6832/udp"
+      # Accept Zipkin spans
+      - "9411:9411"
+      # Accept OTLP gRPC
+      - "4317:4317"
+      # Accept OTLP HTTP
+      - "4318:4318"
+      # Prometheus metrics
+      - "14269:14269"
+    volumes:
+      - jaeger_data:/badger
+    networks:
+      - esm-do-monitoring
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=14269"
+
+  # Node Exporter - Host metrics (optional)
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: esm-do-node-exporter
+    restart: unless-stopped
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - esm-do-monitoring
+    profiles:
+      - full
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=9100"
+
+  # Alertmanager - Alert routing and notifications (optional)
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: esm-do-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+      - "--web.external-url=http://localhost:9093"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    networks:
+      - esm-do-monitoring
+    profiles:
+      - full
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=9093"
+
+  # Loki - Log aggregation (optional)
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: esm-do-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki.yml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    networks:
+      - esm-do-monitoring
+    profiles:
+      - full
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=3100"
+
+networks:
+  esm-do-monitoring:
+    driver: bridge
+    name: esm-do-monitoring
+
+volumes:
+  prometheus_data:
+    name: esm-do-prometheus-data
+  grafana_data:
+    name: esm-do-grafana-data
+  jaeger_data:
+    name: esm-do-jaeger-data
+  alertmanager_data:
+    name: esm-do-alertmanager-data
+  loki_data:
+    name: esm-do-loki-data

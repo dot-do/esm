@@ -1,0 +1,55 @@
+# Grafana Datasource Configuration for esm.do
+# https://esm.do - Living ESM module system for AI agents
+
+apiVersion: 1
+
+datasources:
+  # Prometheus datasource - primary metrics store
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: "POST"
+      manageAlerts: true
+      prometheusType: "Prometheus"
+      prometheusVersion: "2.50.0"
+      incrementalQuerying: true
+      incrementalQueryOverlapWindow: "10m"
+
+  # Jaeger datasource - distributed tracing
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    isDefault: false
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanEndTimeShift: "1h"
+        tags: [{ key: "service.name", value: "service" }]
+        filterByTraceID: true
+        filterBySpanID: true
+
+  # Loki datasource - log aggregation (optional)
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: false
+    editable: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - datasourceUid: jaeger
+          matcherRegex: "traceId=(\\w+)"
+          name: TraceID
+          url: "$${__value.raw}"
+
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1

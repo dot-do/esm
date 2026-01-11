@@ -1,0 +1,252 @@
+# Prometheus Alert Rules for esm.do
+# https://esm.do - Living ESM module system for AI agents
+
+groups:
+  # High-level service health alerts
+  - name: esm-do-service-health
+    interval: 30s
+    rules:
+      # Service down
+      - alert: EsmDoServiceDown
+        expr: up{job="esm-do"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: esm-do
+        annotations:
+          summary: "esm.do service is down"
+          description: "The esm.do service at {{ $labels.instance }} has been down for more than 1 minute."
+          runbook_url: "https://docs.esm.do/runbooks/service-down"
+
+      # Service unhealthy (responding but errors)
+      - alert: EsmDoServiceUnhealthy
+        expr: |
+          (
+            sum(rate(esm_http_requests_total{status=~"5.."}[5m])) by (instance)
+            /
+            sum(rate(esm_http_requests_total[5m])) by (instance)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do error rate is elevated"
+          description: "Error rate for {{ $labels.instance }} is {{ $value | humanizePercentage }} (threshold: 5%)."
+
+  # Latency alerts
+  - name: esm-do-latency
+    interval: 30s
+    rules:
+      # High P50 latency
+      - alert: EsmDoHighP50Latency
+        expr: |
+          histogram_quantile(0.50, sum(rate(esm_http_request_duration_seconds_bucket[5m])) by (le, instance))
+          > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do P50 latency is high"
+          description: "P50 latency for {{ $labels.instance }} is {{ $value | humanizeDuration }} (threshold: 500ms)."
+
+      # High P95 latency
+      - alert: EsmDoHighP95Latency
+        expr: |
+          histogram_quantile(0.95, sum(rate(esm_http_request_duration_seconds_bucket[5m])) by (le, instance))
+          > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do P95 latency is high"
+          description: "P95 latency for {{ $labels.instance }} is {{ $value | humanizeDuration }} (threshold: 2s)."
+
+      # Critical P99 latency
+      - alert: EsmDoCriticalP99Latency
+        expr: |
+          histogram_quantile(0.99, sum(rate(esm_http_request_duration_seconds_bucket[5m])) by (le, instance))
+          > 5.0
+        for: 5m
+        labels:
+          severity: critical
+          service: esm-do
+        annotations:
+          summary: "esm.do P99 latency is critically high"
+          description: "P99 latency for {{ $labels.instance }} is {{ $value | humanizeDuration }} (threshold: 5s)."
+
+  # Error rate alerts
+  - name: esm-do-errors
+    interval: 30s
+    rules:
+      # High 4xx error rate
+      - alert: EsmDoHigh4xxRate
+        expr: |
+          (
+            sum(rate(esm_http_requests_total{status=~"4.."}[5m])) by (instance)
+            /
+            sum(rate(esm_http_requests_total[5m])) by (instance)
+          ) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do 4xx error rate is high"
+          description: "4xx error rate for {{ $labels.instance }} is {{ $value | humanizePercentage }} (threshold: 10%)."
+
+      # High 5xx error rate
+      - alert: EsmDoHigh5xxRate
+        expr: |
+          (
+            sum(rate(esm_http_requests_total{status=~"5.."}[5m])) by (instance)
+            /
+            sum(rate(esm_http_requests_total[5m])) by (instance)
+          ) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          service: esm-do
+        annotations:
+          summary: "esm.do 5xx error rate is high"
+          description: "5xx error rate for {{ $labels.instance }} is {{ $value | humanizePercentage }} (threshold: 1%)."
+
+      # Module execution errors
+      - alert: EsmDoModuleExecutionErrors
+        expr: |
+          (
+            sum(rate(esm_module_executions_total{status="error"}[5m])) by (instance)
+            /
+            sum(rate(esm_module_executions_total[5m])) by (instance)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do module execution error rate is high"
+          description: "Module execution error rate for {{ $labels.instance }} is {{ $value | humanizePercentage }} (threshold: 5%)."
+
+  # Resource usage alerts
+  - name: esm-do-resources
+    interval: 30s
+    rules:
+      # High active connections
+      - alert: EsmDoHighConnectionCount
+        expr: esm_active_connections > 1000
+        for: 5m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do active connection count is high"
+          description: "Active connections for {{ $labels.instance }} is {{ $value }} (threshold: 1000)."
+
+      # Connection exhaustion risk
+      - alert: EsmDoConnectionExhaustionRisk
+        expr: esm_active_connections > 5000
+        for: 2m
+        labels:
+          severity: critical
+          service: esm-do
+        annotations:
+          summary: "esm.do connection exhaustion risk"
+          description: "Active connections for {{ $labels.instance }} is {{ $value }} (threshold: 5000). Risk of connection exhaustion."
+
+      # Module cache miss rate
+      - alert: EsmDoHighCacheMissRate
+        expr: |
+          (
+            sum(rate(esm_module_cache_misses_total[5m])) by (instance)
+            /
+            (sum(rate(esm_module_cache_hits_total[5m])) by (instance) + sum(rate(esm_module_cache_misses_total[5m])) by (instance))
+          ) > 0.30
+        for: 10m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do cache miss rate is high"
+          description: "Cache miss rate for {{ $labels.instance }} is {{ $value | humanizePercentage }} (threshold: 30%)."
+
+  # Traffic alerts
+  - name: esm-do-traffic
+    interval: 30s
+    rules:
+      # Traffic spike
+      - alert: EsmDoTrafficSpike
+        expr: |
+          (
+            sum(rate(esm_http_requests_total[5m])) by (instance)
+            /
+            sum(rate(esm_http_requests_total[1h] offset 5m)) by (instance)
+          ) > 3.0
+        for: 5m
+        labels:
+          severity: info
+          service: esm-do
+        annotations:
+          summary: "esm.do traffic spike detected"
+          description: "Traffic for {{ $labels.instance }} is {{ $value }}x higher than the previous hour."
+
+      # Traffic drop (potential issues)
+      - alert: EsmDoTrafficDrop
+        expr: |
+          (
+            sum(rate(esm_http_requests_total[5m])) by (instance)
+            /
+            sum(rate(esm_http_requests_total[1h] offset 5m)) by (instance)
+          ) < 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do traffic drop detected"
+          description: "Traffic for {{ $labels.instance }} dropped to {{ $value | humanizePercentage }} of the previous hour."
+
+  # Module-specific alerts
+  - name: esm-do-modules
+    interval: 30s
+    rules:
+      # Slow module execution
+      - alert: EsmDoSlowModuleExecution
+        expr: |
+          histogram_quantile(0.95, sum(rate(esm_module_execution_duration_seconds_bucket[5m])) by (le, module))
+          > 10.0
+        for: 5m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do module execution is slow"
+          description: "P95 execution time for module {{ $labels.module }} is {{ $value | humanizeDuration }} (threshold: 10s)."
+
+      # Module sandbox violations
+      - alert: EsmDoSandboxViolation
+        expr: increase(esm_sandbox_violations_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: esm-do
+        annotations:
+          summary: "esm.do sandbox violation detected"
+          description: "{{ $value }} sandbox violations detected for {{ $labels.instance }} in the last 5 minutes."
+
+      # TypeScript compilation errors
+      - alert: EsmDoTypeScriptErrors
+        expr: |
+          (
+            sum(rate(esm_typescript_compilations_total{status="error"}[5m])) by (instance)
+            /
+            sum(rate(esm_typescript_compilations_total[5m])) by (instance)
+          ) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+          service: esm-do
+        annotations:
+          summary: "esm.do TypeScript compilation error rate is high"
+          description: "TypeScript compilation error rate for {{ $labels.instance }} is {{ $value | humanizePercentage }} (threshold: 10%)."

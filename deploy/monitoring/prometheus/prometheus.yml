@@ -1,0 +1,115 @@
+# Prometheus Configuration for esm.do
+# https://esm.do - Living ESM module system for AI agents
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: esm-do
+    environment: production
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+# Load alert rules
+rule_files:
+  - "alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          instance: prometheus
+
+  # ESM.do application metrics
+  - job_name: "esm-do"
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["host.docker.internal:8787"]
+        labels:
+          app: esm-do
+          tier: api
+
+    # Relabel configurations
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: "(.+)"
+        replacement: "esm-do-${1}"
+
+  # ESM.do with service discovery (Kubernetes)
+  - job_name: "esm-do-kubernetes"
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+            - esm-do
+            - default
+    relabel_configs:
+      # Only scrape pods with the annotation prometheus.io/scrape: "true"
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      # Use the port from annotation if specified
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_port]
+        action: replace
+        target_label: __address__
+        regex: (.+)
+        replacement: "${1}:${2}"
+      # Set the metrics path from annotation if specified
+      - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      # Set pod labels
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: replace
+        target_label: app
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: pod
+
+  # ESM.do Docker service discovery
+  - job_name: "esm-do-docker"
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 30s
+    relabel_configs:
+      # Only scrape containers with label prometheus.scrape=true
+      - source_labels: [__meta_docker_container_label_prometheus_scrape]
+        action: keep
+        regex: true
+      # Use container name as instance
+      - source_labels: [__meta_docker_container_name]
+        regex: /?(.+)
+        target_label: instance
+      # Use the port from label if specified
+      - source_labels: [__meta_docker_container_label_prometheus_port]
+        action: replace
+        target_label: __address__
+        regex: (.+)
+
+  # Node exporter for system metrics (optional)
+  - job_name: "node"
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          instance: esm-do-host
+
+  # Jaeger metrics (optional tracing)
+  - job_name: "jaeger"
+    static_configs:
+      - targets: ["jaeger:14269"]
+        labels:
+          instance: jaeger
