@@ -1,0 +1,30 @@
+# Dockerfile for esm.do worker - Development version
+# Optimized for hot reload and debugging
+
+FROM node:20-alpine
+
+# Install curl for health checks and dev tools
+RUN apk add --no-cache curl git
+
+WORKDIR /app
+
+# Copy package files first for better layer caching
+COPY package.json pnpm-lock.yaml* package-lock.json* yarn.lock* ./
+COPY core/package.json ./core/
+
+# Install pnpm and dependencies including devDependencies
+RUN npm install -g pnpm && \
+    pnpm install || npm install
+
+# Copy source code (will be overridden by volume mounts in dev)
+COPY . .
+
+# Build TypeScript (will rebuild on changes)
+RUN pnpm run build || npm run build
+
+# Expose worker port and debug port
+EXPOSE 8787
+EXPOSE 9229
+
+# Default command - run with wrangler dev with hot reload
+CMD ["npx", "wrangler", "dev", "--local", "--port", "8787", "--host", "0.0.0.0"]

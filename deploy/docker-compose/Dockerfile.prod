@@ -1,0 +1,58 @@
+# Dockerfile for esm.do worker - Production version
+# Multi-stage build for minimal image size
+
+# Build stage
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml* package-lock.json* yarn.lock* ./
+COPY core/package.json ./core/
+
+# Install pnpm and all dependencies (including dev for build)
+RUN npm install -g pnpm && \
+    pnpm install --frozen-lockfile || npm ci || npm install
+
+# Copy source code
+COPY . .
+
+# Build TypeScript
+RUN pnpm run build || npm run build
+
+# Prune dev dependencies
+RUN pnpm prune --prod || npm prune --production
+
+# Production stage
+FROM node:20-alpine AS production
+
+# Install curl for health checks only
+RUN apk add --no-cache curl
+
+# Create non-root user for security
+RUN addgroup -g 1001 -S esm && \
+    adduser -S esm -u 1001 -G esm
+
+WORKDIR /app
+
+# Copy built artifacts and production dependencies
+COPY --from=builder --chown=esm:esm /app/dist ./dist
+COPY --from=builder --chown=esm:esm /app/core/dist ./core/dist
+COPY --from=builder --chown=esm:esm /app/node_modules ./node_modules
+COPY --from=builder --chown=esm:esm /app/package.json ./package.json
+COPY --from=builder --chown=esm:esm /app/core/package.json ./core/package.json
+COPY --from=builder --chown=esm:esm /app/wrangler.jsonc ./wrangler.jsonc
+COPY --from=builder --chown=esm:esm /app/src ./src
+
+# Switch to non-root user
+USER esm
+
+# Expose worker port
+EXPOSE 8787
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8787/health || exit 1
+
+# Run with wrangler in production mode
+CMD ["npx", "wrangler", "dev", "--local", "--port", "8787", "--host", "0.0.0.0"]

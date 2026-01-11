@@ -1,0 +1,47 @@
+# Docker Compose development overrides for esm.do
+# Hot reload, debug ports, and development environment
+
+version: "3.8"
+
+services:
+  esm-do:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.dev
+    environment:
+      - NODE_ENV=development
+      - DEBUG=true
+      - LOG_LEVEL=debug
+      - WRANGLER_LOG=debug
+    volumes:
+      # Mount source for hot reload
+      - ../../src:/app/src:cached
+      - ../../core:/app/core:cached
+      - ../../package.json:/app/package.json:ro
+      - ../../wrangler.jsonc:/app/wrangler.jsonc:ro
+      - ../../tsconfig.json:/app/tsconfig.json:ro
+      # Exclude node_modules and build outputs
+      - /app/node_modules
+      - /app/dist
+      - /app/core/dist
+    ports:
+      - "${ESM_PORT:-8787}:8787"
+      # Node.js debug port
+      - "${DEBUG_PORT:-9229}:9229"
+    command: ["npx", "wrangler", "dev", "--local", "--port", "8787", "--host", "0.0.0.0", "--inspector-port", "9229"]
+    # Faster startup for development
+    healthcheck:
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # Development Redis with no persistence for speed
+  redis:
+    command: redis-server --save ""
+    volumes: []
+
+  # Development PostgreSQL - faster startup, no persistence
+  postgres:
+    command: postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+    volumes: []

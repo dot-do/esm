@@ -1,0 +1,79 @@
+# Docker Compose configuration for esm.do local development
+# Main compose file with core services
+
+version: "3.8"
+
+services:
+  # Main ESM.do worker service using Miniflare for local Workers emulation
+  esm-do:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile
+    container_name: esm-do-worker
+    ports:
+      - "${ESM_PORT:-8787}:8787"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://esm:esm@postgres:5432/esm
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - esm-network
+    restart: unless-stopped
+
+  # Redis for caching (optional but recommended)
+  redis:
+    image: redis:7-alpine
+    container_name: esm-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - esm-network
+    restart: unless-stopped
+
+  # PostgreSQL for persistent storage (optional)
+  postgres:
+    image: postgres:16-alpine
+    container_name: esm-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-esm}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-esm}
+      - POSTGRES_DB=${POSTGRES_DB:-esm}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-esm} -d ${POSTGRES_DB:-esm}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - esm-network
+    restart: unless-stopped
+
+networks:
+  esm-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:

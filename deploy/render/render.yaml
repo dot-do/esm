@@ -1,0 +1,95 @@
+# Render Blueprint for esm.do
+# https://render.com/docs/blueprint-spec
+#
+# Deploy: Dashboard > New > Blueprint Instance > Connect this repo
+# Or use: render blueprint sync
+
+services:
+  - type: web
+    name: esm-do
+    runtime: docker
+    region: oregon  # Available: oregon, ohio, virginia, frankfurt, singapore
+
+    # Docker configuration
+    dockerfilePath: ./deploy/render/Dockerfile
+    dockerContext: .
+
+    # Instance configuration
+    plan: starter  # starter, standard, pro, pro-plus
+    numInstances: 1
+
+    # Auto-deploy on push to main
+    autoDeploy: true
+    branch: main
+
+    # Health check configuration
+    healthCheckPath: /health
+
+    # Scaling configuration (available on paid plans)
+    scaling:
+      minInstances: 1
+      maxInstances: 3
+      targetMemoryPercent: 80
+      targetCPUPercent: 80
+
+    # Environment variables
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      - key: PORT
+        value: "8787"
+
+      - key: LOG_LEVEL
+        value: info
+
+      # Service identification
+      - key: SERVICE_NAME
+        value: esm-do
+
+      - key: SERVICE_VERSION
+        sync: false  # Set during build
+
+      # Optional: External API keys (set in dashboard)
+      - key: API_KEY
+        sync: false
+
+      # Optional: Storage configuration
+      - key: STORAGE_BACKEND
+        value: memory
+
+      # Optional: Cache configuration
+      - key: CACHE_TTL
+        value: "3600"
+
+    # Build-time environment variables
+    buildCommand: ""
+
+    # Headers (security)
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-XSS-Protection
+        value: "1; mode=block"
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+
+# Databases (optional, uncomment if needed)
+# databases:
+#   - name: esm-db
+#     databaseName: esm
+#     plan: starter
+#     ipAllowList: []
+
+# Environment groups for shared secrets
+# envVarGroups:
+#   - name: esm-shared
+#     envVars:
+#       - key: SHARED_SECRET
+#         sync: false
