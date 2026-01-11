@@ -1,0 +1,348 @@
+# Artillery Load Test Configuration for esm.do API
+#
+# Usage:
+#   artillery run tests/load/artillery/config.yml
+#   artillery run --environment staging tests/load/artillery/config.yml
+#   artillery run --output report.json tests/load/artillery/config.yml
+#
+# Generate HTML report:
+#   artillery report report.json
+
+config:
+  target: "{{ $processEnvironment.BASE_URL || 'http://localhost:8787' }}"
+
+  # Custom processor for advanced scenarios
+  processor: "./processor.js"
+
+  # Default headers for all requests
+  defaults:
+    headers:
+      Accept: "application/json"
+      Content-Type: "application/json"
+
+  # Load testing phases
+  phases:
+    # Warm-up phase
+    - duration: 60
+      arrivalRate: 5
+      name: "Warm up"
+
+    # Ramp up load
+    - duration: 120
+      arrivalRate: 5
+      rampTo: 50
+      name: "Ramp up load"
+
+    # Sustained load
+    - duration: 300
+      arrivalRate: 50
+      name: "Sustained load"
+
+    # Peak load
+    - duration: 120
+      arrivalRate: 100
+      name: "Peak load"
+
+    # Cool down
+    - duration: 60
+      arrivalRate: 100
+      rampTo: 5
+      name: "Cool down"
+
+  # Plugins
+  plugins:
+    expect: {}
+    metrics-by-endpoint: {}
+
+  # Environment-specific configurations
+  environments:
+    local:
+      target: "http://localhost:8787"
+      phases:
+        - duration: 60
+          arrivalRate: 10
+          name: "Local test"
+
+    staging:
+      target: "https://staging.esm.do"
+      phases:
+        - duration: 60
+          arrivalRate: 5
+          name: "Warm up"
+        - duration: 300
+          arrivalRate: 25
+          name: "Sustained load"
+        - duration: 60
+          arrivalRate: 5
+          name: "Cool down"
+
+    production:
+      target: "https://esm.do"
+      phases:
+        - duration: 60
+          arrivalRate: 10
+          name: "Warm up"
+        - duration: 300
+          arrivalRate: 50
+          name: "Sustained load"
+        - duration: 60
+          arrivalRate: 10
+          name: "Cool down"
+
+    # Smoke test - minimal load
+    smoke:
+      target: "{{ $processEnvironment.BASE_URL || 'http://localhost:8787' }}"
+      phases:
+        - duration: 60
+          arrivalRate: 1
+          name: "Smoke test"
+
+    # Stress test - push limits
+    stress:
+      target: "{{ $processEnvironment.BASE_URL || 'http://localhost:8787' }}"
+      phases:
+        - duration: 120
+          arrivalRate: 10
+          rampTo: 100
+          name: "Ramp to 100"
+        - duration: 300
+          arrivalRate: 100
+          name: "Hold at 100"
+        - duration: 120
+          arrivalRate: 100
+          rampTo: 200
+          name: "Ramp to 200"
+        - duration: 300
+          arrivalRate: 200
+          name: "Hold at 200"
+
+    # Spike test - sudden burst
+    spike:
+      target: "{{ $processEnvironment.BASE_URL || 'http://localhost:8787' }}"
+      phases:
+        - duration: 60
+          arrivalRate: 10
+          name: "Normal load"
+        - duration: 10
+          arrivalRate: 200
+          name: "Spike!"
+        - duration: 60
+          arrivalRate: 200
+          name: "Sustained spike"
+        - duration: 60
+          arrivalRate: 10
+          name: "Recovery"
+
+  # Payload files for test data
+  payload:
+    - path: "./data/modules.csv"
+      fields:
+        - "moduleName"
+        - "moduleCode"
+      skipHeader: true
+      loadAll: true
+      name: "modules"
+      optional: true
+
+  # Variables for scenarios
+  variables:
+    testModules:
+      - "add"
+      - "multiply"
+      - "greet"
+      - "fibonacci"
+    testArgs:
+      - [1, 2]
+      - [3, 4]
+      - [5, 6]
+
+  # Ensure metrics are tracked
+  ensure:
+    p99: 1000
+    p95: 500
+    maxErrorRate: 5
+
+# Performance thresholds
+thresholds:
+  - expression: "http.response_time.p99 < 1000"
+    description: "99th percentile response time should be under 1000ms"
+  - expression: "http.response_time.p95 < 500"
+    description: "95th percentile response time should be under 500ms"
+  - expression: "http.response_time.median < 200"
+    description: "Median response time should be under 200ms"
+  - expression: "vusers.failed < 5"
+    description: "Less than 5% of virtual users should fail"
+
+# Test scenarios
+scenarios:
+  # Health check scenario
+  - name: "Health Check"
+    weight: 10
+    flow:
+      - get:
+          url: "/health"
+          expect:
+            - statusCode: 200
+            - hasProperty: "status"
+
+  # List modules scenario
+  - name: "List Modules"
+    weight: 15
+    flow:
+      - get:
+          url: "/modules"
+          expect:
+            - statusCode:
+                - 200
+                - 404
+
+  # Get module scenario
+  - name: "Get Module"
+    weight: 25
+    flow:
+      - function: "selectRandomModule"
+      - get:
+          url: "/m/{{ moduleName }}"
+          expect:
+            - statusCode:
+                - 200
+                - 404
+          capture:
+            - json: "$.code"
+              as: "moduleCode"
+              strict: false
+
+  # Execute module scenario
+  - name: "Execute Module"
+    weight: 20
+    flow:
+      - function: "selectRandomModule"
+      - post:
+          url: "/x/{{ moduleName }}"
+          json:
+            args: "{{ testArgs }}"
+          expect:
+            - statusCode:
+                - 200
+                - 404
+          capture:
+            - json: "$.result"
+              as: "execResult"
+              strict: false
+
+  # Create and delete module scenario
+  - name: "Create Module Lifecycle"
+    weight: 10
+    flow:
+      - function: "generateModuleName"
+      - function: "generateModuleCode"
+      - post:
+          url: "/modules"
+          json:
+            name: "{{ generatedName }}"
+            code: "{{ generatedCode }}"
+          expect:
+            - statusCode:
+                - 200
+                - 201
+          capture:
+            - json: "$.id"
+              as: "createdModuleId"
+              strict: false
+      - think: 1
+      - delete:
+          url: "/m/{{ generatedName }}"
+          expect:
+            - statusCode:
+                - 200
+                - 204
+                - 404
+
+  # Module metadata scenario
+  - name: "Get Module Metadata"
+    weight: 10
+    flow:
+      - function: "selectRandomModule"
+      - get:
+          url: "/m/{{ moduleName }}/meta"
+          expect:
+            - statusCode:
+                - 200
+                - 404
+
+  # Batch execution scenario
+  - name: "Batch Execution"
+    weight: 5
+    flow:
+      - post:
+          url: "/x/batch"
+          json:
+            executions:
+              - module: "add"
+                args: [1, 2]
+              - module: "multiply"
+                args: [3, 4]
+          expect:
+            - statusCode:
+                - 200
+                - 404
+
+  # Complex workflow scenario
+  - name: "Full Module Workflow"
+    weight: 5
+    flow:
+      - function: "generateModuleName"
+      # Create module
+      - post:
+          url: "/modules"
+          json:
+            name: "{{ generatedName }}"
+            code: "export const run = (x) => x * 2;"
+          expect:
+            - statusCode:
+                - 200
+                - 201
+      - think: 0.5
+      # Get module
+      - get:
+          url: "/m/{{ generatedName }}"
+          expect:
+            - statusCode: 200
+      - think: 0.5
+      # Execute module
+      - post:
+          url: "/x/{{ generatedName }}"
+          json:
+            args: [21]
+          expect:
+            - statusCode: 200
+      - think: 0.5
+      # Update module
+      - put:
+          url: "/m/{{ generatedName }}"
+          json:
+            code: "export const run = (x) => x * 3;"
+          expect:
+            - statusCode:
+                - 200
+                - 404
+      - think: 0.5
+      # Delete module
+      - delete:
+          url: "/m/{{ generatedName }}"
+          expect:
+            - statusCode:
+                - 200
+                - 204
+                - 404
+
+# Hooks for test lifecycle
+before:
+  flow:
+    - log: "Starting Artillery load test..."
+    - get:
+        url: "/health"
+
+after:
+  flow:
+    - log: "Artillery load test completed"

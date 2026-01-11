@@ -44,7 +44,10 @@
     "version:check": "tsx scripts/version-check.ts",
     "changeset": "changeset",
     "changeset:version": "changeset version",
-    "changeset:publish": "changeset publish"
+    "changeset:publish": "changeset publish",
+    "test:load": "k6 run tests/load/k6/api.js",
+    "test:load:smoke": "k6 run --env SCENARIO=smoke tests/load/k6/scenarios.js",
+    "test:load:stress": "k6 run --env SCENARIO=stress tests/load/k6/scenarios.js"
   },
   "keywords": [
     "esm",
