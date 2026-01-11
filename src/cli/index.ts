@@ -11,11 +11,11 @@
 
 import { Command } from 'commander'
 import { ESM } from '../esm.js'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch as fsWatch, writeFileSync } from 'fs'
-import { basename, dirname, join, resolve } from 'path'
-import { homedir, platform, release, type } from 'os'
+import { existsSync, readdirSync, readFileSync, statSync, watch as fsWatch, writeFileSync } from 'fs'
+import { dirname, join, resolve } from 'path'
+import { homedir, platform } from 'os'
 import { createHash } from 'crypto'
-import { execSync, spawn, spawnSync } from 'child_process'
+import { execSync, spawn } from 'child_process'
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { fileURLToPath } from 'url'
 
@@ -1571,6 +1571,1375 @@ deployCmd
       } else {
         console.error(formatError('Deployment failed'))
         if (result.error) console.error(result.error)
+        process.exit(1)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// ============================================================================
+// Module Configuration Types and Utilities for Publishing
+// ============================================================================
+
+interface ModuleConfig {
+  name: string
+  version: string
+  description?: string
+  main?: string
+  types?: string
+  module?: string
+  tests?: string
+  script?: string
+  files?: string[]
+  keywords?: string[]
+  author?: string
+  license?: string
+  repository?: string
+  dependencies?: Record<string, string>
+  devDependencies?: Record<string, string>
+}
+
+interface ValidationResult {
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+}
+
+interface PackageManifest {
+  name: string
+  version: string
+  files: Array<{
+    path: string
+    size: number
+    sha256: string
+  }>
+  integrity: string
+  publishedAt: string
+}
+
+/**
+ * Format warning message
+ */
+function formatWarning(message: string): string {
+  return chalk ? chalk.yellow(`warning: ${message}`) : `warning: ${message}`
+}
+
+/**
+ * Read module configuration from package.json or esm.json
+ */
+function readModuleConfig(modulePath: string): ModuleConfig | null {
+  const resolvedPath = resolve(modulePath)
+
+  // Try esm.json first, then package.json
+  const esmJsonPath = join(resolvedPath, 'esm.json')
+  const packageJsonPath = join(resolvedPath, 'package.json')
+
+  let configFilePath: string | null = null
+  if (existsSync(esmJsonPath)) {
+    configFilePath = esmJsonPath
+  } else if (existsSync(packageJsonPath)) {
+    configFilePath = packageJsonPath
+  }
+
+  if (!configFilePath) {
+    return null
+  }
+
+  try {
+    const content = readFileSync(configFilePath, 'utf-8')
+    return JSON.parse(content) as ModuleConfig
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Validate module structure for publishing
+ */
+function validateModuleStructure(modulePath: string, config: ModuleConfig): ValidationResult {
+  const resolvedPath = resolve(modulePath)
+  const errors: string[] = []
+  const warnings: string[] = []
+
+  // Check required fields
+  if (!config.name) {
+    errors.push('Module name is required')
+  } else if (!config.name.startsWith('@')) {
+    errors.push('Module name must include scope (e.g., @scope/name)')
+  }
+
+  if (!config.version) {
+    errors.push('Module version is required')
+  } else if (!/^\d+\.\d+\.\d+/.test(config.version)) {
+    errors.push('Version must follow semver format (e.g., 1.0.0)')
+  }
+
+  // Check for required files
+  const typesPath = config.types ? join(resolvedPath, config.types) : join(resolvedPath, 'index.d.ts')
+  const moduleSrcPath = config.module ? join(resolvedPath, config.module) : join(resolvedPath, 'index.mjs')
+  const mainPath = config.main ? join(resolvedPath, config.main) : moduleSrcPath
+
+  if (!existsSync(typesPath)) {
+    warnings.push(`Types file not found: ${config.types || 'index.d.ts'}`)
+  }
+
+  if (!existsSync(mainPath) && !existsSync(moduleSrcPath)) {
+    errors.push(`Module entry point not found: ${config.module || config.main || 'index.mjs'}`)
+  }
+
+  // Check for tests if specified
+  if (config.tests) {
+    const testsPath = join(resolvedPath, config.tests)
+    if (!existsSync(testsPath)) {
+      warnings.push(`Tests file not found: ${config.tests}`)
+    }
+  }
+
+  // Check for script if specified
+  if (config.script) {
+    const scriptPath = join(resolvedPath, config.script)
+    if (!existsSync(scriptPath)) {
+      warnings.push(`Script file not found: ${config.script}`)
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings
+  }
+}
+
+/**
+ * Check if user is authenticated
+ */
+function isAuthenticated(): boolean {
+  const config = loadConfig()
+  return !!config['auth.token']
+}
+
+/**
+ * Calculate SHA256 hash of file content
+ */
+function calculateFileHash(filePath: string): string {
+  const content = readFileSync(filePath)
+  return createHash('sha256').update(content).digest('hex')
+}
+
+/**
+ * Collect all files to be published
+ */
+function collectPublishFiles(modulePath: string, config: ModuleConfig): Array<{ path: string; size: number; sha256: string }> {
+  const resolvedPath = resolve(modulePath)
+  const files: Array<{ path: string; size: number; sha256: string }> = []
+
+  // Collect files based on config.files or default patterns
+  const filesToInclude = config.files || ['index.mjs', 'index.d.ts', 'index.test.js', 'index.script.js', 'package.json', 'esm.json', 'README.md', 'LICENSE']
+
+  for (const file of filesToInclude) {
+    const filePath = join(resolvedPath, file)
+    if (existsSync(filePath)) {
+      const stat = statSync(filePath)
+      if (stat.isFile()) {
+        files.push({
+          path: file,
+          size: stat.size,
+          sha256: calculateFileHash(filePath)
+        })
+      } else if (stat.isDirectory()) {
+        // Recursively collect directory contents
+        const dirFiles = collectDirectoryFiles(filePath, file)
+        files.push(...dirFiles)
+      }
+    }
+  }
+
+  // Also check for main/module/types files if specified
+  if (config.main && !files.some(f => f.path === config.main)) {
+    const mainPath = join(resolvedPath, config.main)
+    if (existsSync(mainPath)) {
+      const stat = statSync(mainPath)
+      files.push({
+        path: config.main,
+        size: stat.size,
+        sha256: calculateFileHash(mainPath)
+      })
+    }
+  }
+
+  if (config.module && !files.some(f => f.path === config.module)) {
+    const moduleSrcPath = join(resolvedPath, config.module)
+    if (existsSync(moduleSrcPath)) {
+      const stat = statSync(moduleSrcPath)
+      files.push({
+        path: config.module,
+        size: stat.size,
+        sha256: calculateFileHash(moduleSrcPath)
+      })
+    }
+  }
+
+  if (config.types && !files.some(f => f.path === config.types)) {
+    const typesPath = join(resolvedPath, config.types)
+    if (existsSync(typesPath)) {
+      const stat = statSync(typesPath)
+      files.push({
+        path: config.types,
+        size: stat.size,
+        sha256: calculateFileHash(typesPath)
+      })
+    }
+  }
+
+  return files
+}
+
+/**
+ * Recursively collect files from a directory
+ */
+function collectDirectoryFiles(dirPath: string, relativePath: string): Array<{ path: string; size: number; sha256: string }> {
+  const files: Array<{ path: string; size: number; sha256: string }> = []
+
+  try {
+    const entries = readdirSync(dirPath)
+    for (const entry of entries) {
+      const fullPath = join(dirPath, entry)
+      const relPath = join(relativePath, entry)
+      const stat = statSync(fullPath)
+
+      if (stat.isFile()) {
+        files.push({
+          path: relPath,
+          size: stat.size,
+          sha256: calculateFileHash(fullPath)
+        })
+      } else if (stat.isDirectory()) {
+        files.push(...collectDirectoryFiles(fullPath, relPath))
+      }
+    }
+  } catch {
+    // Ignore errors reading directory
+  }
+
+  return files
+}
+
+/**
+ * Create package manifest
+ */
+function createPackageManifest(config: ModuleConfig, files: Array<{ path: string; size: number; sha256: string }>): PackageManifest {
+  // Calculate integrity hash from all file hashes
+  const integrityData = files.map(f => `${f.path}:${f.sha256}`).join('\n')
+  const integrity = createHash('sha512').update(integrityData).digest('base64')
+
+  return {
+    name: config.name,
+    version: config.version,
+    files,
+    integrity: `sha512-${integrity}`,
+    publishedAt: new Date().toISOString()
+  }
+}
+
+/**
+ * Format file size in human-readable format
+ */
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+// ============================================================================
+// publish command
+// ============================================================================
+program
+  .command('publish [path]')
+  .description('Publish module to esm.do registry')
+  .option('--tag <tag>', 'Publish with tag (latest, beta, etc.)', 'latest')
+  .option('--access <access>', 'Access level (public, restricted)', 'public')
+  .option('--dry-run', 'Show what would be published without publishing')
+  .option('--otp <code>', 'One-time password for 2FA')
+  .addHelpText(
+    'after',
+    `
+Examples:
+  esm publish                      Publish current directory
+  esm publish ./my-module          Publish module at path
+  esm publish --tag beta           Publish with beta tag
+  esm publish --dry-run            Preview publish without uploading
+  esm publish --access restricted  Publish as restricted access`
+  )
+  .action(async (path: string | undefined, options: {
+    tag?: string
+    access?: string
+    dryRun?: boolean
+    otp?: string
+  }) => {
+    try {
+      const modulePath = path || process.cwd()
+
+      // Step 1: Read module configuration
+      console.log(formatInfo('Reading module configuration...'))
+      const config = readModuleConfig(modulePath)
+
+      if (!config) {
+        console.error(formatError('No package.json or esm.json found in module directory'))
+        process.exit(1)
+      }
+
+      console.log(formatInfo(`Found module: ${config.name}@${config.version}`))
+
+      // Step 2: Validate module structure
+      console.log(formatInfo('Validating module structure...'))
+      const validation = validateModuleStructure(modulePath, config)
+
+      for (const warning of validation.warnings) {
+        console.log(formatWarning(warning))
+      }
+
+      if (!validation.valid) {
+        for (const error of validation.errors) {
+          console.error(formatError(error))
+        }
+        process.exit(1)
+      }
+
+      console.log(formatSuccess('Module structure is valid'))
+
+      // Step 3: Check authentication
+      if (!options.dryRun) {
+        console.log(formatInfo('Checking authentication...'))
+        if (!isAuthenticated()) {
+          console.error(formatError('Not logged in. Run "esm login" first.'))
+          process.exit(1)
+        }
+        console.log(formatSuccess('Authenticated'))
+      }
+
+      // Step 4: Collect files to publish
+      console.log(formatInfo('Collecting files...'))
+      const files = collectPublishFiles(modulePath, config)
+
+      if (files.length === 0) {
+        console.error(formatError('No files to publish'))
+        process.exit(1)
+      }
+
+      console.log(formatInfo(`Found ${files.length} files to publish:`))
+      let totalSize = 0
+      for (const file of files) {
+        console.log(`  ${file.path} (${formatFileSize(file.size)})`)
+        totalSize += file.size
+      }
+      console.log(formatInfo(`Total size: ${formatFileSize(totalSize)}`))
+
+      // Step 5: Create manifest
+      const manifest = createPackageManifest(config, files)
+
+      // Step 6: Dry run or publish
+      if (options.dryRun) {
+        console.log('')
+        console.log(formatHeader('Dry run - would publish:'))
+        console.log(`  Name: ${manifest.name}`)
+        console.log(`  Version: ${manifest.version}`)
+        console.log(`  Tag: ${options.tag}`)
+        console.log(`  Access: ${options.access}`)
+        console.log(`  Files: ${manifest.files.length}`)
+        console.log(`  Integrity: ${manifest.integrity}`)
+        console.log('')
+        console.log(formatSuccess('Dry run complete. No changes made.'))
+        return
+      }
+
+      // Step 7: Build if necessary (check for build script)
+      const packageJsonPath = join(resolve(modulePath), 'package.json')
+      if (existsSync(packageJsonPath)) {
+        try {
+          const pkgContent = readFileSync(packageJsonPath, 'utf-8')
+          const pkg = JSON.parse(pkgContent)
+          if (pkg.scripts?.build) {
+            console.log(formatInfo('Running build...'))
+            try {
+              execSync('npm run build', { cwd: resolve(modulePath), stdio: 'inherit' })
+              console.log(formatSuccess('Build complete'))
+            } catch {
+              console.error(formatError('Build failed'))
+              process.exit(1)
+            }
+          }
+        } catch {
+          // Ignore package.json parse errors
+        }
+      }
+
+      // Step 8: Publish to registry
+      console.log(formatInfo('Publishing to esm.do registry...'))
+
+      try {
+        // Read file contents for upload
+        const fileContents: Record<string, string> = {}
+        for (const file of files) {
+          const filePath = join(resolve(modulePath), file.path)
+          fileContents[file.path] = readFileSync(filePath, 'utf-8')
+        }
+
+        // Use the local ESM instance to write the module
+        const typesContent = fileContents['index.d.ts'] || fileContents[config.types || ''] || ''
+        const moduleContent = fileContents['index.mjs'] || fileContents[config.module || ''] || fileContents[config.main || ''] || ''
+        const testsContent = fileContents['index.test.js'] || fileContents[config.tests || ''] || ''
+        const scriptContent = fileContents['index.script.js'] || fileContents[config.script || ''] || ''
+
+        if (moduleContent) {
+          const result = await esm.write({
+            name: config.name,
+            types: typesContent || 'export {};\n',
+            module: moduleContent,
+            tests: testsContent,
+            script: scriptContent,
+          })
+
+          console.log('')
+          console.log(formatSuccess(`Published ${config.name}@${config.version}`))
+          console.log(formatInfo(`Version hash: ${result.version}`))
+          console.log(formatInfo(`Tag: ${options.tag}`))
+          console.log(formatInfo(`Access: ${options.access}`))
+          console.log('')
+          console.log(formatInfo(`View at: https://esm.do/${config.name.replace('@', '')}`))
+        } else {
+          console.error(formatError('No module content found to publish'))
+          process.exit(1)
+        }
+
+      } catch (error: unknown) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        console.error(formatError(`Publish failed: ${err.message}`))
+        process.exit(1)
+      }
+
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// ============================================================================
+// pack command
+// ============================================================================
+program
+  .command('pack [path]')
+  .description('Create a tarball of the module')
+  .option('-o, --output <file>', 'Output filename')
+  .option('--json', 'Output pack info as JSON')
+  .addHelpText(
+    'after',
+    `
+Examples:
+  esm pack                         Pack current directory
+  esm pack ./my-module             Pack module at path
+  esm pack -o my-module.tgz        Pack with custom filename`
+  )
+  .action(async (path: string | undefined, options: {
+    output?: string
+    json?: boolean
+  }) => {
+    try {
+      const modulePath = path || process.cwd()
+
+      // Read module configuration
+      const config = readModuleConfig(modulePath)
+
+      if (!config) {
+        console.error(formatError('No package.json or esm.json found in module directory'))
+        process.exit(1)
+      }
+
+      // Validate module structure
+      const validation = validateModuleStructure(modulePath, config)
+
+      if (!validation.valid) {
+        for (const error of validation.errors) {
+          console.error(formatError(error))
+        }
+        process.exit(1)
+      }
+
+      // Collect files
+      const files = collectPublishFiles(modulePath, config)
+
+      if (files.length === 0) {
+        console.error(formatError('No files to pack'))
+        process.exit(1)
+      }
+
+      // Create manifest
+      const manifest = createPackageManifest(config, files)
+
+      // Determine output filename
+      const safeName = config.name.replace('@', '').replace('/', '-')
+      const outputFile = options.output || `${safeName}-${config.version}.tgz`
+
+      // Create tarball content (simple JSON manifest for now)
+      // In production, this would create an actual gzipped tarball
+      const tarballContent = JSON.stringify({
+        manifest,
+        files: files.map(f => ({
+          ...f,
+          content: readFileSync(join(resolve(modulePath), f.path), 'utf-8')
+        }))
+      }, null, 2)
+
+      // Write tarball (as JSON for now, would be actual tar.gz in production)
+      const outputPath = join(process.cwd(), outputFile)
+      writeFileSync(outputPath, tarballContent)
+
+      const totalSize = files.reduce((sum, f) => sum + f.size, 0)
+
+      if (options.json) {
+        console.log(JSON.stringify({
+          filename: outputFile,
+          name: config.name,
+          version: config.version,
+          size: tarballContent.length,
+          unpackedSize: totalSize,
+          files: files.length,
+          integrity: manifest.integrity
+        }, null, 2))
+      } else {
+        console.log(formatSuccess(`Created ${outputFile}`))
+        console.log(formatInfo(`Package: ${config.name}@${config.version}`))
+        console.log(formatInfo(`Size: ${formatFileSize(tarballContent.length)}`))
+        console.log(formatInfo(`Unpacked size: ${formatFileSize(totalSize)}`))
+        console.log(formatInfo(`Files: ${files.length}`))
+        console.log(formatInfo(`Integrity: ${manifest.integrity}`))
+      }
+
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// ============================================================================
+// unpublish command
+// ============================================================================
+program
+  .command('unpublish <spec>')
+  .description('Remove a published version from esm.do registry')
+  .option('-f, --force', 'Force unpublish without confirmation')
+  .option('--otp <code>', 'One-time password for 2FA')
+  .addHelpText(
+    'after',
+    `
+Examples:
+  esm unpublish @scope/name@1.0.0  Unpublish specific version
+  esm unpublish @scope/name        Unpublish entire package (requires --force)
+  esm unpublish @scope/name --force  Force unpublish`
+  )
+  .action(async (spec: string, options: {
+    force?: boolean
+    otp?: string
+  }) => {
+    try {
+      // Parse package spec (name[@version])
+      const atIndex = spec.lastIndexOf('@')
+      let name: string
+      let version: string | undefined
+
+      if (atIndex > 0 && spec.indexOf('@') !== atIndex) {
+        // Has version: @scope/name@version
+        name = spec.substring(0, atIndex)
+        version = spec.substring(atIndex + 1)
+      } else {
+        // No version: @scope/name or name (entire package)
+        name = spec
+        version = undefined
+      }
+
+      // Validate name
+      if (!name.startsWith('@')) {
+        console.error(formatError('Package name must include scope (e.g., @scope/name)'))
+        process.exit(1)
+      }
+
+      // Check authentication
+      if (!isAuthenticated()) {
+        console.error(formatError('Not logged in. Run "esm login" first.'))
+        process.exit(1)
+      }
+
+      // Require --force for entire package unpublish
+      if (!version && !options.force) {
+        console.error(formatError('Unpublishing an entire package requires --force'))
+        console.error(formatInfo('To unpublish a specific version, use: esm unpublish @scope/name@version'))
+        process.exit(1)
+      }
+
+      // Warn about unpublishing
+      if (!options.force) {
+        console.log(formatWarning('Unpublishing versions can break dependent packages.'))
+        console.log(formatWarning('Use --force to confirm.'))
+        process.exit(1)
+      }
+
+      console.log(formatInfo(`Unpublishing ${name}${version ? `@${version}` : ''}...`))
+
+      // Perform unpublish
+      if (!version) {
+        // Delete entire package
+        try {
+          await esm.delete(name)
+          console.log(formatSuccess(`Unpublished ${name} (all versions)`))
+        } catch (error: unknown) {
+          const err = error instanceof Error ? error : new Error(String(error))
+          if (err.message.includes('not found')) {
+            console.error(formatError(`Package ${name} not found`))
+          } else {
+            console.error(formatError(`Failed to unpublish: ${err.message}`))
+          }
+          process.exit(1)
+        }
+      } else {
+        // For version-specific unpublish, we would need version-aware storage
+        // For now, we'll just inform the user
+        console.log(formatWarning('Version-specific unpublish is not yet supported'))
+        console.log(formatInfo('The entire package would need to be unpublished'))
+        process.exit(1)
+      }
+
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// ============================================================================
+// deprecate command
+// ============================================================================
+program
+  .command('deprecate <spec> <message>')
+  .description('Deprecate a version with a warning message')
+  .option('--otp <code>', 'One-time password for 2FA')
+  .addHelpText(
+    'after',
+    `
+Examples:
+  esm deprecate @scope/name@1.0.0 "Use 2.0.0 instead"
+  esm deprecate @scope/name "This package is no longer maintained"`
+  )
+  .action(async (spec: string, message: string, _options: {
+    otp?: string
+  }) => {
+    try {
+      // Parse package spec (name[@version])
+      const atIndex = spec.lastIndexOf('@')
+      let name: string
+      let version: string | undefined
+
+      if (atIndex > 0 && spec.indexOf('@') !== atIndex) {
+        // Has version: @scope/name@version
+        name = spec.substring(0, atIndex)
+        version = spec.substring(atIndex + 1)
+      } else {
+        // No version: @scope/name (all versions)
+        name = spec
+        version = undefined
+      }
+
+      // Validate name
+      if (!name.startsWith('@')) {
+        console.error(formatError('Package name must include scope (e.g., @scope/name)'))
+        process.exit(1)
+      }
+
+      // Check authentication
+      if (!isAuthenticated()) {
+        console.error(formatError('Not logged in. Run "esm login" first.'))
+        process.exit(1)
+      }
+
+      console.log(formatInfo(`Deprecating ${name}${version ? `@${version}` : ''}...`))
+
+      // In production, this would update the package metadata in the registry
+      // For now, we'll store the deprecation message in config
+      const config = loadConfig()
+      const deprecationKey = `deprecation.${name}${version ? `@${version}` : ''}`
+      config[deprecationKey] = message
+      saveConfig(config)
+
+      console.log(formatSuccess(`Deprecated ${name}${version ? `@${version}` : ''}`))
+      console.log(formatInfo(`Message: ${message}`))
+
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// ============================================================================
+// dist-tag command
+// ============================================================================
+const distTagCmd = program
+  .command('dist-tag')
+  .description('Manage distribution tags')
+
+distTagCmd
+  .command('add <spec> <tag>')
+  .description('Add a dist-tag to a package version')
+  .option('--otp <code>', 'One-time password for 2FA')
+  .action(async (spec: string, tag: string, _options: { otp?: string }) => {
+    try {
+      // Parse package spec (name@version)
+      const atIndex = spec.lastIndexOf('@')
+
+      if (atIndex <= 0 || spec.indexOf('@') === atIndex) {
+        console.error(formatError('Package spec must include version (e.g., @scope/name@1.0.0)'))
+        process.exit(1)
+      }
+
+      const name = spec.substring(0, atIndex)
+      const version = spec.substring(atIndex + 1)
+
+      // Validate name
+      if (!name.startsWith('@')) {
+        console.error(formatError('Package name must include scope (e.g., @scope/name)'))
+        process.exit(1)
+      }
+
+      // Check authentication
+      if (!isAuthenticated()) {
+        console.error(formatError('Not logged in. Run "esm login" first.'))
+        process.exit(1)
+      }
+
+      // Store dist-tag in config (in production, this would update registry)
+      const config = loadConfig()
+      const tagKey = `dist-tag.${name}.${tag}`
+      config[tagKey] = version
+      saveConfig(config)
+
+      console.log(formatSuccess(`Added tag ${tag} to ${name}@${version}`))
+
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+distTagCmd
+  .command('rm <name> <tag>')
+  .description('Remove a dist-tag from a package')
+  .option('--otp <code>', 'One-time password for 2FA')
+  .action(async (name: string, tag: string, _options: { otp?: string }) => {
+    try {
+      // Validate name
+      if (!name.startsWith('@')) {
+        console.error(formatError('Package name must include scope (e.g., @scope/name)'))
+        process.exit(1)
+      }
+
+      // Prevent removing 'latest' tag
+      if (tag === 'latest') {
+        console.error(formatError('Cannot remove the "latest" tag'))
+        process.exit(1)
+      }
+
+      // Check authentication
+      if (!isAuthenticated()) {
+        console.error(formatError('Not logged in. Run "esm login" first.'))
+        process.exit(1)
+      }
+
+      // Remove dist-tag from config
+      const config = loadConfig()
+      const tagKey = `dist-tag.${name}.${tag}`
+
+      if (!config[tagKey]) {
+        console.error(formatError(`Tag "${tag}" not found on ${name}`))
+        process.exit(1)
+      }
+
+      delete config[tagKey]
+      saveConfig(config)
+
+      console.log(formatSuccess(`Removed tag ${tag} from ${name}`))
+
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+distTagCmd
+  .command('ls [name]')
+  .description('List dist-tags for a package')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (name: string | undefined, options: { json?: boolean }) => {
+    try {
+      const config = loadConfig()
+
+      if (name) {
+        // Validate name
+        if (!name.startsWith('@')) {
+          console.error(formatError('Package name must include scope (e.g., @scope/name)'))
+          process.exit(1)
+        }
+
+        // Find all tags for this package
+        const prefix = `dist-tag.${name}.`
+        const tags: Record<string, string> = {}
+
+        for (const [key, value] of Object.entries(config)) {
+          if (key.startsWith(prefix)) {
+            const tagName = key.substring(prefix.length)
+            tags[tagName] = value
+          }
+        }
+
+        if (Object.keys(tags).length === 0) {
+          console.log(formatInfo(`No dist-tags found for ${name}`))
+          return
+        }
+
+        if (options.json) {
+          console.log(JSON.stringify(tags, null, 2))
+        } else {
+          console.log(formatHeader(`Dist-tags for ${name}:`))
+          for (const [tagName, version] of Object.entries(tags)) {
+            console.log(`  ${tagName}: ${version}`)
+          }
+        }
+      } else {
+        // List all dist-tags
+        const allTags: Record<string, Record<string, string>> = {}
+
+        for (const [key, value] of Object.entries(config)) {
+          if (key.startsWith('dist-tag.')) {
+            const parts = key.substring('dist-tag.'.length).split('.')
+            if (parts.length < 2) continue
+            const pkgName = parts.slice(0, -1).join('.')
+            const tagName = parts[parts.length - 1]!
+
+            if (!allTags[pkgName]) {
+              allTags[pkgName] = {}
+            }
+            allTags[pkgName][tagName] = value
+          }
+        }
+
+        if (Object.keys(allTags).length === 0) {
+          console.log(formatInfo('No dist-tags configured'))
+          return
+        }
+
+        if (options.json) {
+          console.log(JSON.stringify(allTags, null, 2))
+        } else {
+          for (const [pkgName, tags] of Object.entries(allTags)) {
+            console.log(formatHeader(`${pkgName}:`))
+            for (const [tagName, version] of Object.entries(tags)) {
+              console.log(`  ${tagName}: ${version}`)
+            }
+          }
+        }
+      }
+
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// ============================================================================
+// Diagnostic Utilities
+// ============================================================================
+
+/**
+ * Execute a command and return the output, or null if it fails
+ */
+function execCommand(command: string): string | null {
+  try {
+    return execSync(command, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Check if a command exists in PATH
+ */
+function commandExists(command: string): boolean {
+  const result = spawnSync(process.platform === 'win32' ? 'where' : 'which', [command], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  return result.status === 0
+}
+
+/**
+ * Parse semver version string to compare versions
+ */
+function parseVersion(version: string): number[] {
+  const match = version.match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!match) return [0, 0, 0]
+  return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)]
+}
+
+/**
+ * Compare two version arrays: returns positive if v1 > v2, negative if v1 < v2, 0 if equal
+ */
+function compareVersions(v1: number[], v2: number[]): number {
+  for (let i = 0; i < 3; i++) {
+    if (v1[i] > v2[i]) return 1
+    if (v1[i] < v2[i]) return -1
+  }
+  return 0
+}
+
+/**
+ * Format a check result for display
+ */
+function formatCheck(passed: boolean, label: string, detail?: string): string {
+  const icon = passed
+    ? (chalk ? chalk.green('\u2713') : '\u2713')
+    : (chalk ? chalk.red('\u2717') : '\u2717')
+  const labelText = passed
+    ? (chalk ? chalk.green(label) : label)
+    : (chalk ? chalk.red(label) : label)
+  const detailText = detail ? ` ${chalk ? chalk.cyan(detail) : detail}` : ''
+  return `${icon} ${labelText}${detailText}`
+}
+
+/**
+ * Format a warning for display
+ */
+function formatWarning(message: string): string {
+  return chalk ? chalk.yellow(`  \u26A0 ${message}`) : `  ! ${message}`
+}
+
+// ============================================================================
+// info command
+// ============================================================================
+program
+  .command('info')
+  .description('Display environment and configuration info')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: { json?: boolean }) => {
+    try {
+      // Gather environment info
+      const nodeVersion = process.version
+      const npmVersion = execCommand('npm --version') || 'not found'
+      const osType = type()
+      const osRelease = release()
+      const osPlatform = platform()
+      const config = loadConfig()
+      const authStatus = config['auth.token'] ? 'authenticated' : 'not authenticated'
+
+      // Check available deploy targets
+      const deployTargets: Record<string, boolean> = {
+        wrangler: commandExists('wrangler'),
+        vercel: commandExists('vercel'),
+        fly: commandExists('fly') || commandExists('flyctl'),
+        docker: commandExists('docker'),
+      }
+
+      const info = {
+        esm: {
+          version: VERSION,
+          configPath,
+        },
+        node: {
+          version: nodeVersion,
+          npm: npmVersion,
+        },
+        os: {
+          type: osType,
+          platform: osPlatform,
+          release: osRelease,
+        },
+        auth: {
+          status: authStatus,
+        },
+        deployTargets,
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(info, null, 2))
+      } else {
+        console.log(formatHeader('esm.do CLI'))
+        console.log(`  Version:     ${VERSION}`)
+        console.log(`  Config Path: ${configPath}`)
+        console.log('')
+        console.log(formatHeader('Node.js'))
+        console.log(`  Version: ${nodeVersion}`)
+        console.log(`  npm:     ${npmVersion}`)
+        console.log('')
+        console.log(formatHeader('Operating System'))
+        console.log(`  Type:     ${osType}`)
+        console.log(`  Platform: ${osPlatform}`)
+        console.log(`  Release:  ${osRelease}`)
+        console.log('')
+        console.log(formatHeader('Authentication'))
+        console.log(`  Status: ${authStatus}`)
+        console.log('')
+        console.log(formatHeader('Deploy Targets'))
+        for (const [target, available] of Object.entries(deployTargets)) {
+          const status = available
+            ? (chalk ? chalk.green('available') : 'available')
+            : (chalk ? chalk.yellow('not installed') : 'not installed')
+          console.log(`  ${target}: ${status}`)
+        }
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      console.error(formatError(err.message))
+      process.exit(1)
+    }
+  })
+
+// ============================================================================
+// doctor command
+// ============================================================================
+
+interface DoctorCheck {
+  name: string
+  passed: boolean
+  version?: string
+  message?: string
+  suggestion?: string
+}
+
+program
+  .command('doctor')
+  .description('Check system for potential problems')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: { json?: boolean }) => {
+    const checks: DoctorCheck[] = []
+
+    // 1. Node.js version >= 18
+    const nodeVersionStr = process.version.replace('v', '')
+    const nodeVersion = parseVersion(nodeVersionStr)
+    const nodeOk = compareVersions(nodeVersion, [18, 0, 0]) >= 0
+    checks.push({
+      name: 'Node.js version',
+      passed: nodeOk,
+      version: process.version,
+      message: nodeOk ? 'Node.js 18+ detected' : 'Node.js 18+ required',
+      suggestion: nodeOk ? undefined : 'Install Node.js 18 or later from https://nodejs.org',
+    })
+
+    // 2. TypeScript installed
+    const tscVersion = execCommand('tsc --version')
+    const tsInstalled = tscVersion !== null
+    checks.push({
+      name: 'TypeScript',
+      passed: tsInstalled,
+      version: tscVersion || undefined,
+      message: tsInstalled ? 'TypeScript compiler found' : 'TypeScript not found',
+      suggestion: tsInstalled ? undefined : 'Run: npm install -g typescript',
+    })
+
+    // 3. Wrangler installed (for Cloudflare)
+    const wranglerVersion = execCommand('wrangler --version')
+    const wranglerInstalled = wranglerVersion !== null
+    checks.push({
+      name: 'Wrangler (Cloudflare)',
+      passed: wranglerInstalled,
+      version: wranglerVersion || undefined,
+      message: wranglerInstalled ? 'Wrangler CLI found' : 'Wrangler not installed (optional)',
+      suggestion: wranglerInstalled ? undefined : 'Run: npm install -g wrangler',
+    })
+
+    // 4. Config file valid
+    let configValid = false
+    let configMessage = ''
+    try {
+      if (existsSync(configPath)) {
+        const config = loadConfig()
+        configValid = typeof config === 'object' && config !== null
+        configMessage = configValid ? 'Config file is valid' : 'Config file is invalid'
+      } else {
+        configValid = true
+        configMessage = 'No config file (using defaults)'
+      }
+    } catch {
+      configMessage = 'Config file is corrupted'
+    }
+    checks.push({
+      name: 'Config file',
+      passed: configValid,
+      message: configMessage,
+      suggestion: configValid ? undefined : `Delete or fix ${configPath}`,
+    })
+
+    // 5. Auth token valid (if set)
+    const config = loadConfig()
+    const hasToken = !!config['auth.token']
+    checks.push({
+      name: 'Authentication',
+      passed: true,
+      message: hasToken ? 'Auth token configured' : 'Not authenticated (optional)',
+      suggestion: hasToken ? undefined : 'Run: esm login --token <your-token>',
+    })
+
+    // 6. Network connectivity to esm.do
+    let networkOk = false
+    try {
+      const result = execCommand('curl -s --max-time 5 -o /dev/null -w "%{http_code}" https://esm.do')
+      networkOk = result === '200' || result === '301' || result === '302'
+    } catch {
+      networkOk = false
+    }
+    checks.push({
+      name: 'Network connectivity',
+      passed: networkOk,
+      message: networkOk ? 'Can reach esm.do' : 'Cannot reach esm.do',
+      suggestion: networkOk ? undefined : 'Check your internet connection and firewall settings',
+    })
+
+    // 7. Optional CLIs
+    const optionalClis = [
+      { name: 'Docker', command: 'docker', versionCmd: 'docker --version' },
+      { name: 'Fly.io', command: 'fly', versionCmd: 'fly version', altCommand: 'flyctl' },
+      { name: 'Vercel', command: 'vercel', versionCmd: 'vercel --version' },
+    ]
+
+    for (const cli of optionalClis) {
+      const exists = commandExists(cli.command) || (cli.altCommand && commandExists(cli.altCommand))
+      const version = exists ? execCommand(cli.versionCmd) : null
+      checks.push({
+        name: cli.name,
+        passed: true,
+        version: version || undefined,
+        message: exists ? `${cli.name} CLI available` : `${cli.name} not installed (optional)`,
+      })
+    }
+
+    // Output results
+    if (options.json) {
+      console.log(JSON.stringify({ checks }, null, 2))
+    } else {
+      console.log(formatHeader('esm.do Doctor'))
+      console.log('')
+
+      for (const check of checks) {
+        const versionInfo = check.version ? `(${check.version})` : ''
+        console.log(formatCheck(check.passed, check.name, versionInfo))
+        if (check.message) {
+          console.log(`  ${check.message}`)
+        }
+        if (!check.passed && check.suggestion) {
+          console.log(formatWarning(check.suggestion))
+        }
+        console.log('')
+      }
+
+      const failedChecks = checks.filter(c => !c.passed)
+      if (failedChecks.length === 0) {
+        console.log(formatSuccess('All checks passed!'))
+      } else {
+        console.log(formatError(`${failedChecks.length} check(s) need attention`))
+      }
+    }
+  })
+
+// ============================================================================
+// completion command
+// ============================================================================
+program
+  .command('completion')
+  .description('Generate shell completion script')
+  .argument('<shell>', 'Shell type (bash, zsh, fish)')
+  .action((shell: string) => {
+    const programName = 'esm'
+    const commands = [
+      'init', 'write', 'read', 'run', 'test', 'versions', 'log', 'diff',
+      'delete', 'login', 'logout', 'whoami', 'config', 'server', 'deploy',
+      'info', 'doctor', 'completion', 'update', 'help'
+    ]
+
+    switch (shell.toLowerCase()) {
+      case 'bash':
+        console.log(`# esm.do bash completion
+# Add this to your ~/.bashrc or ~/.bash_profile:
+# eval "$(esm completion bash)"
+
+_esm_completions() {
+  local cur="\${COMP_WORDS[COMP_CWORD]}"
+  local commands="${commands.join(' ')}"
+
+  if [ \$COMP_CWORD -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "\$commands" -- "\$cur") )
+  fi
+}
+
+complete -F _esm_completions ${programName}`)
+        break
+
+      case 'zsh':
+        console.log(`#compdef ${programName}
+# esm.do zsh completion
+# Add this to your ~/.zshrc:
+# eval "$(esm completion zsh)"
+
+_${programName}() {
+  local -a commands
+  commands=(
+    'init:Initialize a new ESM module'
+    'write:Write content to an ESM module'
+    'read:Read content of an ESM module'
+    'run:Run an ESM module script'
+    'test:Run tests for an ESM module'
+    'versions:List versions of an ESM module'
+    'log:Show commit log for an ESM module'
+    'diff:Compare two versions of an ESM module'
+    'delete:Delete an ESM module'
+    'login:Authenticate with esm.do'
+    'logout:Log out from esm.do'
+    'whoami:Show current user'
+    'config:Manage configuration'
+    'server:Start local development server'
+    'deploy:Deploy to various platforms'
+    'info:Display environment and configuration info'
+    'doctor:Check system for potential problems'
+    'completion:Generate shell completion script'
+    'update:Check for and install updates'
+    'help:Show help for command'
+  )
+
+  _describe -t commands 'esm commands' commands
+}
+
+compdef _${programName} ${programName}`)
+        break
+
+      case 'fish':
+        console.log(`# esm.do fish completion
+# Save this to ~/.config/fish/completions/esm.fish
+
+complete -c ${programName} -f
+
+complete -c ${programName} -n '__fish_use_subcommand' -a 'init' -d 'Initialize a new ESM module'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'write' -d 'Write content to an ESM module'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'read' -d 'Read content of an ESM module'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'run' -d 'Run an ESM module script'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'test' -d 'Run tests for an ESM module'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'versions' -d 'List versions of an ESM module'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'log' -d 'Show commit log for an ESM module'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'diff' -d 'Compare two versions of an ESM module'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'delete' -d 'Delete an ESM module'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'login' -d 'Authenticate with esm.do'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'logout' -d 'Log out from esm.do'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'whoami' -d 'Show current user'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'config' -d 'Manage configuration'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'server' -d 'Start local development server'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'deploy' -d 'Deploy to various platforms'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'info' -d 'Display environment and configuration info'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'doctor' -d 'Check system for potential problems'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'completion' -d 'Generate shell completion script'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'update' -d 'Check for and install updates'
+complete -c ${programName} -n '__fish_use_subcommand' -a 'help' -d 'Show help for command'`)
+        break
+
+      default:
+        console.error(formatError(`Unknown shell: ${shell}`))
+        console.error('Supported shells: bash, zsh, fish')
+        process.exit(1)
+    }
+  })
+
+// ============================================================================
+// update command
+// ============================================================================
+program
+  .command('update')
+  .description('Check for and install updates')
+  .option('--check', 'Only check, do not install')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: { check?: boolean; json?: boolean }) => {
+    try {
+      // Get current version
+      const currentVersion = VERSION
+
+      // Check npm registry for latest version
+      const registryOutput = execCommand('npm view esm.do version 2>/dev/null')
+      const latestVersion = registryOutput?.trim() || null
+
+      if (!latestVersion) {
+        if (options.json) {
+          console.log(JSON.stringify({
+            current: currentVersion,
+            latest: null,
+            updateAvailable: false,
+            error: 'Could not fetch latest version from npm registry',
+          }, null, 2))
+        } else {
+          console.log(formatWarning('Could not fetch latest version from npm registry'))
+          console.log(`Current version: ${currentVersion}`)
+        }
+        return
+      }
+
+      const currentParsed = parseVersion(currentVersion)
+      const latestParsed = parseVersion(latestVersion)
+      const updateAvailable = compareVersions(latestParsed, currentParsed) > 0
+
+      if (options.json) {
+        console.log(JSON.stringify({
+          current: currentVersion,
+          latest: latestVersion,
+          updateAvailable,
+        }, null, 2))
+        return
+      }
+
+      console.log(formatHeader('esm.do Update Check'))
+      console.log('')
+      console.log(`Current version: ${currentVersion}`)
+      console.log(`Latest version:  ${latestVersion}`)
+      console.log('')
+
+      if (!updateAvailable) {
+        console.log(formatSuccess('You are running the latest version!'))
+        return
+      }
+
+      console.log(formatInfo(`Update available: ${currentVersion} -> ${latestVersion}`))
+      console.log('')
+
+      if (options.check) {
+        console.log('Run `esm update` to install the update')
+        return
+      }
+
+      // Perform update
+      console.log('Installing update...')
+      console.log('')
+
+      try {
+        const updateResult = execSync('npm update -g esm.do', {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+        console.log(updateResult)
+        console.log(formatSuccess(`Successfully updated to ${latestVersion}`))
+      } catch (updateError: unknown) {
+        const err = updateError instanceof Error ? updateError : new Error(String(updateError))
+        console.error(formatError('Failed to install update'))
+        console.error(formatWarning('Try running: npm update -g esm.do'))
+        console.error(formatWarning('You may need to use sudo or run as administrator'))
+        if (err.message) {
+          console.error(err.message)
+        }
         process.exit(1)
       }
     } catch (error: unknown) {
