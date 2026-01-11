@@ -7,7 +7,8 @@
   "types": "dist/index.d.ts",
   "bin": {
     "esm": "./bin/esm",
-    "esm.do": "./bin/esm.do.js"
+    "esm.do": "./bin/esm.do.js",
+    "esm-mcp": "./dist/mcp/server.js"
   },
   "exports": {
     ".": {
