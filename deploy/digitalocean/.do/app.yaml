@@ -1,0 +1,153 @@
+# DigitalOcean App Platform Specification for esm.do
+# https://docs.digitalocean.com/products/app-platform/reference/app-spec/
+#
+# Deploy using:
+#   doctl apps create --spec deploy/digitalocean/.do/app.yaml
+#   doctl apps update <app-id> --spec deploy/digitalocean/.do/app.yaml
+
+name: esm-do
+region: nyc
+
+# =============================================================================
+# Services
+# =============================================================================
+services:
+  - name: esm-do
+    # Docker configuration
+    dockerfile_path: deploy/digitalocean/Dockerfile
+    source_dir: /
+
+    # GitHub repository (uncomment and configure for auto-deploy)
+    # github:
+    #   repo: dot-do/esm
+    #   branch: main
+    #   deploy_on_push: true
+
+    # Instance configuration
+    instance_size_slug: basic-xxs  # basic-xxs, basic-xs, basic-s, basic-m, professional-xs, etc.
+    instance_count: 1
+
+    # HTTP configuration
+    http_port: 8787
+
+    # Routes
+    routes:
+      - path: /
+
+    # Health check configuration
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 30
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+
+    # Scaling configuration (for production)
+    # autoscaling:
+    #   min_instance_count: 1
+    #   max_instance_count: 5
+    #   metrics:
+    #     cpu:
+    #       percent: 80
+
+    # Environment variables
+    envs:
+      # Runtime configuration
+      - key: NODE_ENV
+        value: production
+        scope: RUN_AND_BUILD_TIME
+
+      - key: PORT
+        value: "8787"
+        scope: RUN_TIME
+
+      - key: HOST
+        value: "0.0.0.0"
+        scope: RUN_TIME
+
+      - key: LOG_LEVEL
+        value: info
+        scope: RUN_TIME
+
+      # Service identification
+      - key: SERVICE_NAME
+        value: esm-do
+        scope: RUN_TIME
+
+      - key: SERVICE_VERSION
+        value: "${_self.commit_hash}"
+        scope: RUN_TIME
+        type: GENERAL
+
+      # Optional: API key (set via dashboard or doctl)
+      # - key: ESM_API_KEY
+      #   scope: RUN_TIME
+      #   type: SECRET
+
+      # Optional: Storage configuration
+      - key: STORAGE_BACKEND
+        value: memory
+        scope: RUN_TIME
+
+      # Optional: Cache TTL in seconds
+      - key: CACHE_TTL
+        value: "3600"
+        scope: RUN_TIME
+
+    # CORS configuration (handled by worker)
+    cors:
+      allow_origins:
+        - prefix: "*"
+      allow_methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+      allow_headers:
+        - Content-Type
+        - Authorization
+        - X-Requested-With
+      max_age: "3600"
+
+    # Alerts (optional)
+    alerts:
+      - rule: DEPLOYMENT_FAILED
+      - rule: DOMAIN_FAILED
+      - rule: DEPLOYMENT_LIVE
+
+    # Log destinations (optional, configure in dashboard)
+    # log_destinations:
+    #   - name: papertrail
+    #     papertrail:
+    #       endpoint: syslog+tls://logs.papertrailapp.com:12345
+
+# =============================================================================
+# Databases (optional, uncomment if needed)
+# =============================================================================
+# databases:
+#   - name: esm-db
+#     engine: PG
+#     version: "15"
+#     size: db-s-dev-database
+#     num_nodes: 1
+
+# =============================================================================
+# Domain configuration (optional)
+# =============================================================================
+# domains:
+#   - domain: esm.do
+#     type: PRIMARY
+#     zone: esm.do
+
+# =============================================================================
+# Ingress configuration
+# =============================================================================
+ingress:
+  rules:
+    - component:
+        name: esm-do
+      match:
+        path:
+          prefix: /
