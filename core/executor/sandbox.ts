@@ -58,7 +58,7 @@
  * - This allows request monitoring, rate limiting, and access control
  */
 
-import { evaluate, type EvaluateResult, type TestResults as AITestResults } from 'ai-evaluate'
+import { evaluate, type TestResults as AITestResults } from 'ai-evaluate'
 import { sanitizeModuleCode, sanitizeTestCode, sanitizeScriptCode } from './sanitize.js'
 import type {
   Executor,
@@ -172,9 +172,11 @@ function parseTypeDeclarations(types: string): Map<string, { kind: 'function' | 
   funcRegex.lastIndex = 0
   while ((match = funcRegex.exec(types)) !== null) {
     const name = match[1]
-    const params = match[2].trim()
+    const params = match[2]
+    if (name === undefined || params === undefined) continue
+    const trimmedParams = params.trim()
     // Count parameters by splitting on comma (handling empty case)
-    const arity = params === '' ? 0 : params.split(',').length
+    const arity = trimmedParams === '' ? 0 : trimmedParams.split(',').length
     exports.set(name, { kind: 'function', arity })
   }
 
@@ -183,7 +185,9 @@ function parseTypeDeclarations(types: string): Map<string, { kind: 'function' | 
   // Reset lastIndex for global regex before exec loop
   constRegex.lastIndex = 0
   while ((match = constRegex.exec(types)) !== null) {
-    exports.set(match[1], { kind: 'const' })
+    const name = match[1]
+    if (name === undefined) continue
+    exports.set(name, { kind: 'const' })
   }
 
   // Match class declarations: export declare class Name
@@ -191,7 +195,9 @@ function parseTypeDeclarations(types: string): Map<string, { kind: 'function' | 
   // Reset lastIndex for global regex before exec loop
   classRegex.lastIndex = 0
   while ((match = classRegex.exec(types)) !== null) {
-    exports.set(match[1], { kind: 'class' })
+    const name = match[1]
+    if (name === undefined) continue
+    exports.set(name, { kind: 'class' })
   }
 
   return exports
@@ -208,8 +214,10 @@ function parseModuleExports(module: string): Map<string, { kind: 'function' | 'c
   funcRegex.lastIndex = 0
   while ((match = funcRegex.exec(module)) !== null) {
     const name = match[1]
-    const params = match[2].trim()
-    const arity = params === '' ? 0 : params.split(',').length
+    const params = match[2]
+    if (name === undefined || params === undefined) continue
+    const trimmedParams = params.trim()
+    const arity = trimmedParams === '' ? 0 : trimmedParams.split(',').length
     exports.set(name, { kind: 'function', arity })
   }
 
@@ -218,7 +226,9 @@ function parseModuleExports(module: string): Map<string, { kind: 'function' | 'c
   // Reset lastIndex for global regex before exec loop
   constRegex.lastIndex = 0
   while ((match = constRegex.exec(module)) !== null) {
-    exports.set(match[1], { kind: 'const' })
+    const name = match[1]
+    if (name === undefined) continue
+    exports.set(name, { kind: 'const' })
   }
 
   // Match exported let: export let name = value
@@ -226,7 +236,9 @@ function parseModuleExports(module: string): Map<string, { kind: 'function' | 'c
   // Reset lastIndex for global regex before exec loop
   letRegex.lastIndex = 0
   while ((match = letRegex.exec(module)) !== null) {
-    exports.set(match[1], { kind: 'const' })
+    const name = match[1]
+    if (name === undefined) continue
+    exports.set(name, { kind: 'const' })
   }
 
   // Match exported class: export class Name
@@ -234,7 +246,9 @@ function parseModuleExports(module: string): Map<string, { kind: 'function' | 'c
   // Reset lastIndex for global regex before exec loop
   classRegex.lastIndex = 0
   while ((match = classRegex.exec(module)) !== null) {
-    exports.set(match[1], { kind: 'class' })
+    const name = match[1]
+    if (name === undefined) continue
+    exports.set(name, { kind: 'class' })
   }
 
   return exports
@@ -269,7 +283,8 @@ function extractExportNames(module: string): string[] {
   // Reset lastIndex for global regex before exec loop
   funcRegex.lastIndex = 0
   while ((match = funcRegex.exec(module)) !== null) {
-    names.push(match[1])
+    const name = match[1]
+    if (name !== undefined) names.push(name)
   }
 
   // Match export const name
@@ -277,7 +292,8 @@ function extractExportNames(module: string): string[] {
   // Reset lastIndex for global regex before exec loop
   constRegex.lastIndex = 0
   while ((match = constRegex.exec(module)) !== null) {
-    names.push(match[1])
+    const name = match[1]
+    if (name !== undefined) names.push(name)
   }
 
   // Match export let name
@@ -285,7 +301,8 @@ function extractExportNames(module: string): string[] {
   // Reset lastIndex for global regex before exec loop
   letRegex.lastIndex = 0
   while ((match = letRegex.exec(module)) !== null) {
-    names.push(match[1])
+    const name = match[1]
+    if (name !== undefined) names.push(name)
   }
 
   // Match export class name
@@ -293,7 +310,8 @@ function extractExportNames(module: string): string[] {
   // Reset lastIndex for global regex before exec loop
   classRegex.lastIndex = 0
   while ((match = classRegex.exec(module)) !== null) {
-    names.push(match[1])
+    const name = match[1]
+    if (name !== undefined) names.push(name)
   }
 
   return names
@@ -309,12 +327,17 @@ function convertLogs(aiLogs: Array<{ level: string; message: string; timestamp: 
 
 // Convert ai-evaluate test results to our TestResult format
 function convertTestResults(aiResults: AITestResults): SingleTestResult[] {
-  return aiResults.tests.map(test => ({
-    name: test.name,
-    status: test.passed ? 'passed' : 'failed',
-    error: test.error,
-    duration: test.duration
-  }))
+  return aiResults.tests.map(test => {
+    const result: SingleTestResult = {
+      name: test.name,
+      status: test.passed ? 'passed' : 'failed',
+      duration: test.duration
+    }
+    if (test.error !== undefined) {
+      result.error = test.error
+    }
+    return result
+  })
 }
 
 export class SandboxExecutor implements Executor {
@@ -583,7 +606,8 @@ globalThis.args = ${JSON.stringify(args || {})};
       } else {
         // Wrap and auto-return last expression
         const lines = scriptSanitization.sanitized.trim().split('\n')
-        const lastLine = lines[lines.length - 1].trim()
+        const lastLineRaw = lines[lines.length - 1]
+        const lastLine = lastLineRaw !== undefined ? lastLineRaw.trim() : ''
         // Add return to last expression if it's not a declaration or control flow
         if (lastLine && !/^\s*(const|let|var|if|for|while|switch|try|class|function|return|throw)\b/.test(lastLine)) {
           lines[lines.length - 1] = `return ${lastLine.replace(/;?\s*$/, '')}`

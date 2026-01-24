@@ -86,18 +86,26 @@ export class ESM {
     // Set storage
     this.storage = resolvedOptions.storage || new InMemoryStorage()
 
-    // Set default options
-    this.options = {
+    // Set default options - build object conditionally to satisfy exactOptionalPropertyTypes
+    const baseOptions = {
       storage: this.storage,
       enableCaching: resolvedOptions.enableCaching ?? true,
       cacheSize: resolvedOptions.cacheSize ?? 1000,
       validateOnWrite: resolvedOptions.validateOnWrite ?? true,
-      logger: resolvedOptions.logger,
-      executor: resolvedOptions.executor,
     }
+    // Only add optional properties if they are defined
+    this.options = resolvedOptions.logger !== undefined && resolvedOptions.executor !== undefined
+      ? { ...baseOptions, logger: resolvedOptions.logger, executor: resolvedOptions.executor }
+      : resolvedOptions.logger !== undefined
+        ? { ...baseOptions, logger: resolvedOptions.logger }
+        : resolvedOptions.executor !== undefined
+          ? { ...baseOptions, executor: resolvedOptions.executor }
+          : baseOptions
 
-    // Initialize logger
-    this.logger = resolvedOptions.logger
+    // Initialize logger - only set if defined to satisfy exactOptionalPropertyTypes
+    if (resolvedOptions.logger !== undefined) {
+      this.logger = resolvedOptions.logger
+    }
 
     // Initialize executor for safe code execution
     // Use injected executor if provided, otherwise default to SandboxExecutor
@@ -275,19 +283,28 @@ export class ESM {
     const funcRegex = /export\s+(?:async\s+)?function\s+(\w+)/g
     let match
     while ((match = funcRegex.exec(moduleCode)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name !== undefined) {
+        names.push(name)
+      }
     }
 
     // Match export const name
     const constRegex = /export\s+const\s+(\w+)/g
     while ((match = constRegex.exec(moduleCode)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name !== undefined) {
+        names.push(name)
+      }
     }
 
     // Match export let name
     const letRegex = /export\s+let\s+(\w+)/g
     while ((match = letRegex.exec(moduleCode)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name !== undefined) {
+        names.push(name)
+      }
     }
 
     return names
@@ -427,7 +444,7 @@ export class ESM {
     if (!this.hasEsmDoImports(options.module)) {
       try {
         const exports = await this.executeModuleSandboxed(options.module)
-        this.moduleCache.set(options.name, exports)
+        this.addToCache(options.name, exports)
       } catch (error: unknown) {
         // Execution failed - that's okay, we'll try again during run()
         const err = error instanceof Error ? error : new Error(String(error))
@@ -759,14 +776,17 @@ export class ESM {
   private computeLCS(oldLines: string[], newLines: string[]): number[][] {
     const m = oldLines.length
     const n = newLines.length
-    const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0))
+    const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0) as number[])
 
     for (let i = 1; i <= m; i++) {
       for (let j = 1; j <= n; j++) {
+        const dpRow = dp[i]
+        const dpPrevRow = dp[i - 1]
+        if (!dpRow || !dpPrevRow) continue
         if (oldLines[i - 1] === newLines[j - 1]) {
-          dp[i][j] = dp[i - 1][j - 1] + 1
+          dpRow[j] = (dpPrevRow[j - 1] ?? 0) + 1
         } else {
-          dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1])
+          dpRow[j] = Math.max(dpPrevRow[j] ?? 0, dpRow[j - 1] ?? 0)
         }
       }
     }
@@ -794,7 +814,7 @@ export class ESM {
         diffOps.unshift({ type: 'equal', oldIdx: i - 1, newIdx: j - 1 })
         i--
         j--
-      } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      } else if (j > 0 && (i === 0 || (dp[i]?.[j - 1] ?? 0) >= (dp[i - 1]?.[j] ?? 0))) {
         diffOps.unshift({ type: 'insert', newIdx: j - 1 })
         j--
       } else {
@@ -811,6 +831,7 @@ export class ESM {
 
     for (let opIdx = 0; opIdx < diffOps.length; opIdx++) {
       const op = diffOps[opIdx]
+      if (!op) continue
 
       if (op.type !== 'equal') {
         // Start a new hunk or extend the current one
@@ -828,22 +849,31 @@ export class ESM {
           // Add context before
           for (let c = contextStart; c < opIdx; c++) {
             const ctxOp = diffOps[c]
-            if (ctxOp.type === 'equal' && ctxOp.oldIdx !== undefined) {
-              currentHunk.lines.push(` ${oldLines[ctxOp.oldIdx]}`)
-              currentHunk.oldCount++
-              currentHunk.newCount++
+            if (ctxOp && ctxOp.type === 'equal' && ctxOp.oldIdx !== undefined) {
+              const oldLine = oldLines[ctxOp.oldIdx]
+              if (oldLine !== undefined) {
+                currentHunk.lines.push(` ${oldLine}`)
+                currentHunk.oldCount++
+                currentHunk.newCount++
+              }
             }
           }
         }
 
         // Add the change
         if (op.type === 'delete' && op.oldIdx !== undefined) {
-          currentHunk.lines.push(`-${oldLines[op.oldIdx]}`)
-          currentHunk.oldCount++
+          const oldLine = oldLines[op.oldIdx]
+          if (oldLine !== undefined) {
+            currentHunk.lines.push(`-${oldLine}`)
+            currentHunk.oldCount++
+          }
           oldIdx++
         } else if (op.type === 'insert' && op.newIdx !== undefined) {
-          currentHunk.lines.push(`+${newLines[op.newIdx]}`)
-          currentHunk.newCount++
+          const newLine = newLines[op.newIdx]
+          if (newLine !== undefined) {
+            currentHunk.lines.push(`+${newLine}`)
+            currentHunk.newCount++
+          }
           newIdx++
         }
       } else {
@@ -851,7 +881,7 @@ export class ESM {
         if (currentHunk) {
           // Check if we should close the hunk
           let nextChangeIdx = opIdx + 1
-          while (nextChangeIdx < diffOps.length && diffOps[nextChangeIdx].type === 'equal') {
+          while (nextChangeIdx < diffOps.length && diffOps[nextChangeIdx]?.type === 'equal') {
             nextChangeIdx++
           }
 
@@ -861,10 +891,13 @@ export class ESM {
             const contextEnd = Math.min(opIdx + contextLines, diffOps.length)
             for (let c = opIdx; c < contextEnd; c++) {
               const ctxOp = diffOps[c]
-              if (ctxOp.type === 'equal' && ctxOp.oldIdx !== undefined) {
-                currentHunk.lines.push(` ${oldLines[ctxOp.oldIdx]}`)
-                currentHunk.oldCount++
-                currentHunk.newCount++
+              if (ctxOp && ctxOp.type === 'equal' && ctxOp.oldIdx !== undefined) {
+                const oldLine = oldLines[ctxOp.oldIdx]
+                if (oldLine !== undefined) {
+                  currentHunk.lines.push(` ${oldLine}`)
+                  currentHunk.oldCount++
+                  currentHunk.newCount++
+                }
               }
             }
             hunks.push(currentHunk)
@@ -872,9 +905,12 @@ export class ESM {
           } else {
             // Continue hunk with this equal line
             if (op.oldIdx !== undefined) {
-              currentHunk.lines.push(` ${oldLines[op.oldIdx]}`)
-              currentHunk.oldCount++
-              currentHunk.newCount++
+              const oldLine = oldLines[op.oldIdx]
+              if (oldLine !== undefined) {
+                currentHunk.lines.push(` ${oldLine}`)
+                currentHunk.oldCount++
+                currentHunk.newCount++
+              }
             }
           }
         }

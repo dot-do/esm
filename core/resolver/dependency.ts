@@ -104,7 +104,6 @@ const EXPORT_FUNC_REGEX = /export\s+(?:async\s+)?function\s+(\w+)/g
 const EXPORT_CONST_REGEX = /export\s+const\s+(\w+)/g
 const EXPORT_LET_REGEX = /export\s+let\s+(\w+)/g
 const EXPORT_CLASS_REGEX = /export\s+class\s+(\w+)/g
-const STRIP_IMPORTS_REGEX = /import\s+(?:(\w+)\s*,?\s*)?(?:\*\s+as\s+(\w+)|{([^}]+)})?\s*from\s*['"]esm\.do\/[^'"]+['"]\s*;?/g
 
 // Quick check pattern (non-capturing for speed)
 const HAS_ESM_IMPORT = /import[^]*esm\.do\/@/
@@ -198,11 +197,13 @@ export class DependencyResolver {
         // Parse named imports, handling aliases
         const parts = namedImportsStr.split(',')
         for (let i = 0; i < parts.length; i++) {
-          const part = parts[i].trim()
+          const partRaw = parts[i]
+          if (partRaw === undefined) continue
+          const part = partRaw.trim()
           if (!part) continue
           // Handle "name as alias" pattern - we want the original name
           const asMatch = ALIAS_REGEX.exec(part)
-          if (asMatch) {
+          if (asMatch && asMatch[1] !== undefined) {
             namedImports.push(asMatch[1])
           } else {
             namedImports.push(part)
@@ -210,14 +211,21 @@ export class DependencyResolver {
         }
       }
 
-      imports.push({
+      // moduleName is guaranteed by the regex pattern to exist when match succeeds
+      const resolvedModuleName = moduleName ?? ''
+      const parsedImport: ParsedImport = {
         statement,
-        specifier: `esm.do/${moduleName}`,
-        moduleName,
+        specifier: `esm.do/${resolvedModuleName}`,
+        moduleName: resolvedModuleName,
         namedImports,
-        defaultImport: defaultImport || undefined,
-        namespaceImport: namespaceImport || undefined,
-      })
+      }
+      if (defaultImport) {
+        parsedImport.defaultImport = defaultImport
+      }
+      if (namespaceImport) {
+        parsedImport.namespaceImport = namespaceImport
+      }
+      imports.push(parsedImport)
     }
 
     // Cache the result
@@ -517,18 +525,6 @@ ${entrySource}
       .replace(/export\s+class\s+/g, 'class ')
   }
 
-  /**
-   * Strip import statements from source
-   */
-  private stripImports(source: string): string {
-    // Early return if no esm.do imports
-    if (!HAS_ESM_IMPORT.test(source)) {
-      return source
-    }
-    // Reset regex lastIndex and remove esm.do import statements
-    STRIP_IMPORTS_REGEX.lastIndex = 0
-    return source.replace(STRIP_IMPORTS_REGEX, '')
-  }
 
   /**
    * Convert module name to safe JavaScript identifier
@@ -575,22 +571,26 @@ ${entrySource}
     // Match export function name
     let match
     while ((match = EXPORT_FUNC_REGEX.exec(source)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name !== undefined) names.push(name)
     }
 
     // Match export const name
     while ((match = EXPORT_CONST_REGEX.exec(source)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name !== undefined) names.push(name)
     }
 
     // Match export let name
     while ((match = EXPORT_LET_REGEX.exec(source)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name !== undefined) names.push(name)
     }
 
     // Match export class name
     while ((match = EXPORT_CLASS_REGEX.exec(source)) !== null) {
-      names.push(match[1])
+      const name = match[1]
+      if (name !== undefined) names.push(name)
     }
 
     // Cache the result

@@ -11,8 +11,8 @@
 export interface SingleTestResult {
   name: string
   status: 'passed' | 'failed' | 'skipped'
-  error?: string
-  duration?: number
+  error?: string | undefined
+  duration?: number | undefined
 }
 
 /**
