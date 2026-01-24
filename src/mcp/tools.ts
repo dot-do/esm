@@ -205,112 +205,12 @@ export const doTool: MCPTool = {
 
 /**
  * Registry of all MCP tools
+ * Only contains the 3 core tools: search, fetch, do
  */
 export const mcpTools: Record<string, MCPTool> = {
   search: searchTool,
   fetch: fetchTool,
   do: doTool,
-  // Legacy tool names for backward compatibility
-  esm_write: {
-    name: 'esm_write',
-    description: 'Create or update an ESM module with types, code, tests, and script',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'The module name (e.g., "@math/add")' },
-        types: { type: 'string', description: 'TypeScript declarations (.d.ts content)' },
-        module: { type: 'string', description: 'ESM module implementation (.mjs content)' },
-        tests: { type: 'string', description: 'Module test file content for validation' },
-        script: { type: 'string', description: 'Executable script file for the module' },
-      },
-      required: ['name'],
-    },
-  },
-  esm_read: {
-    name: 'esm_read',
-    description: 'Read an ESM module by name, optionally at a specific version',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'The module name to read' },
-        version: { type: 'string', description: 'Specific version hash to read (defaults to latest)' },
-        file: { type: 'string', enum: ['types', 'module', 'tests', 'script'], description: 'Specific file to read from the module' },
-      },
-      required: ['name'],
-    },
-  },
-  esm_run: {
-    name: 'esm_run',
-    description: 'Execute a module script and return the result',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'The module name to run' },
-        args: { type: 'object', description: 'Arguments to pass to the script execution' },
-      },
-      required: ['name'],
-    },
-  },
-  esm_test: {
-    name: 'esm_test',
-    description: 'Run tests for an ESM module',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'The module name to test' },
-        filter: { type: 'string', description: 'Pattern to filter tests by name' },
-      },
-      required: ['name'],
-    },
-  },
-  esm_list: {
-    name: 'esm_list',
-    description: 'List ESM modules matching a pattern or scope',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        pattern: { type: 'string', description: 'Filter modules by name pattern (e.g., "add")' },
-        scope: { type: 'string', description: 'Filter modules by scope (e.g., "@math")' },
-      },
-    },
-  },
-  esm_versions: {
-    name: 'esm_versions',
-    description: 'Get version history for an ESM module',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'The module name' },
-        limit: { type: 'number', description: 'Maximum number of versions to return' },
-      },
-      required: ['name'],
-    },
-  },
-  esm_diff: {
-    name: 'esm_diff',
-    description: 'Compare two versions of an ESM module',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'The module name' },
-        from: { type: 'string', description: 'Starting version hash' },
-        to: { type: 'string', description: 'Ending version hash (defaults to HEAD)' },
-      },
-      required: ['name', 'from'],
-    },
-  },
-  esm_delete: {
-    name: 'esm_delete',
-    description: 'Delete an ESM module',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'The module name to delete' },
-        force: { type: 'boolean', description: 'Force delete even if module has dependents' },
-      },
-      required: ['name'],
-    },
-  },
 }
 
 // ============================================================================
@@ -567,185 +467,12 @@ export function createDoHandler(scope: DoScope): (input: { code: string }) => Pr
 }
 
 // ============================================================================
-// Legacy Tool Handlers (for backward compatibility)
-// ============================================================================
-
-/**
- * Validate required parameters
- */
-function validateRequired(input: Record<string, unknown>, required: string[]): string | null {
-  for (const param of required) {
-    if (input[param] === undefined || input[param] === null || input[param] === '') {
-      return `Required parameter "${param}" is missing or empty`
-    }
-  }
-  return null
-}
-
-/**
- * Handle legacy esm_* tool calls
- */
-async function handleLegacyToolCall(
-  toolName: string,
-  input: Record<string, unknown>,
-  esm: ESM
-): Promise<MCPToolResponse> {
-  try {
-    switch (toolName) {
-      case 'esm_write': {
-        const validationError = validateRequired(input, ['name'])
-        if (validationError) {
-          return errorResponse('Input validation failed', { name: validationError })
-        }
-
-        const writeOptions: { name: string; types?: string; module?: string; tests?: string; script?: string } = {
-          name: input.name as string,
-        }
-        if (input.types) writeOptions.types = input.types as string
-        if (input.module) writeOptions.module = input.module as string
-        if (input.tests) writeOptions.tests = input.tests as string
-        if (input.script) writeOptions.script = input.script as string
-
-        const result = await esm.write(writeOptions)
-        return successResponse(
-          `Module written successfully.\nVersion: ${result.version}` +
-            (result.testResults
-              ? `\nTests: ${result.testResults.passed} passed, ${result.testResults.failed} failed`
-              : '') +
-            (result.value !== undefined ? `\nScript result: ${JSON.stringify(result.value)}` : '')
-        )
-      }
-
-      case 'esm_read': {
-        const validationError = validateRequired(input, ['name'])
-        if (validationError) {
-          return errorResponse('Input validation failed', { name: validationError })
-        }
-
-        const result = await esm.read(input.name as string, input.version as string | undefined)
-        const file = input.file as string | undefined
-        if (file) {
-          const content = result[file as keyof typeof result]
-          return successResponse(`${file}:\n${content}`)
-        }
-        return successResponse(
-          `Module: ${result.name}\nVersion: ${result.version}\n\nTypes:\n${result.types}\n\nModule:\n${result.module}` +
-            (result.tests ? `\n\nTests:\n${result.tests}` : '') +
-            (result.script ? `\n\nScript:\n${result.script}` : '')
-        )
-      }
-
-      case 'esm_run': {
-        const validationError = validateRequired(input, ['name'])
-        if (validationError) {
-          return errorResponse('Input validation failed', { name: validationError })
-        }
-
-        const result = await esm.run(input.name as string, input.args as Record<string, unknown> | undefined)
-        return successResponse(
-          `Result: ${JSON.stringify(result.value)}` +
-            (result.logs.length > 0 ? `\n\nLogs:\n${result.logs.join('\n')}` : '')
-        )
-      }
-
-      case 'esm_test': {
-        const validationError = validateRequired(input, ['name'])
-        if (validationError) {
-          return errorResponse('Input validation failed', { name: validationError })
-        }
-
-        const result = await esm.test(input.name as string, input.filter as string | undefined)
-        const summary = `Tests: ${result.passed} passed, ${result.failed} failed`
-        const details = result.results
-          .map(
-            (r) =>
-              `  ${r.status === 'passed' ? '[PASS]' : '[FAIL]'} ${r.name}` + (r.error ? `\n    Error: ${r.error}` : '')
-          )
-          .join('\n')
-        return successResponse(`${summary}\n\n${details}`)
-      }
-
-      case 'esm_list': {
-        const pattern = input.pattern as string | undefined
-        const scope = input.scope as string | undefined
-
-        const listOptions: { pattern?: string; scope?: string } = {}
-        if (pattern) listOptions.pattern = pattern
-        if (scope) listOptions.scope = scope
-
-        const result = await esm.list(listOptions)
-
-        // Apply client-side filtering
-        let filtered = result
-        if (scope) {
-          filtered = filtered.filter((m) => m.name.startsWith(scope))
-        }
-        if (pattern) {
-          filtered = filtered.filter((m) => m.name.includes(pattern))
-        }
-
-        if (filtered.length === 0) {
-          return successResponse('No modules found.')
-        }
-        const list = filtered.map((m) => `  ${m.name} (${m.version})`).join('\n')
-        return successResponse(`Modules:\n${list}`)
-      }
-
-      case 'esm_versions': {
-        const validationError = validateRequired(input, ['name'])
-        if (validationError) {
-          return errorResponse('Input validation failed', { name: validationError })
-        }
-
-        const result = await esm.versions(input.name as string, input.limit as number | undefined)
-        if (result.length === 0) {
-          return successResponse('No versions found.')
-        }
-        const list = result.map((v) => `  ${v.version} - ${v.message} (${v.date})`).join('\n')
-        return successResponse(`Versions:\n${list}`)
-      }
-
-      case 'esm_diff': {
-        const validationError = validateRequired(input, ['name', 'from'])
-        if (validationError) {
-          return errorResponse('Input validation failed', { fields: validationError })
-        }
-
-        const result = await esm.diff(input.name as string, input.from as string, (input.to as string) || 'HEAD')
-        const summary = `Diff from ${result.from} to ${result.to}`
-        const totalAdditions = result.changes.reduce((sum, c) => sum + c.additions, 0)
-        const totalDeletions = result.changes.reduce((sum, c) => sum + c.deletions, 0)
-        const stats = `${totalAdditions} additions, ${totalDeletions} deletions`
-        const changes = result.changes.map((c) => `  ${c.file}: +${c.additions} -${c.deletions}`).join('\n')
-        return successResponse(`${summary}\n${stats}\n\nChanges:\n${changes}\n\nPatch:\n${result.patch}`)
-      }
-
-      case 'esm_delete': {
-        const validationError = validateRequired(input, ['name'])
-        if (validationError) {
-          return errorResponse('Input validation failed', { name: validationError })
-        }
-
-        const result = await esm.delete(input.name as string, (input.force as boolean) || false)
-        return successResponse(`Module ${result.name || input.name} deleted successfully.`)
-      }
-
-      default:
-        return errorResponse(`Unknown tool: ${toolName}`)
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return errorResponse(message)
-  }
-}
-
-// ============================================================================
 // Main Tool Call Handler
 // ============================================================================
 
 /**
  * Handle an MCP tool call
- * Supports both new (search/fetch/do) and legacy (esm_*) tool names
+ * Only supports the 3 core tools: search, fetch, do
  */
 export async function handleToolCall(
   toolName: string,
@@ -758,7 +485,6 @@ export async function handleToolCall(
   }
 
   try {
-    // Handle new tools
     if (toolName === 'search') {
       const handler = createSearchHandler(esm)
       return handler(input as { query: string; limit?: number })
@@ -775,8 +501,8 @@ export async function handleToolCall(
       return handler(input as { code: string })
     }
 
-    // Handle legacy tools
-    return handleLegacyToolCall(toolName, input, esm)
+    // Should never reach here since we check mcpTools above
+    return errorResponse(`Unknown tool: ${toolName}`)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return errorResponse(message)

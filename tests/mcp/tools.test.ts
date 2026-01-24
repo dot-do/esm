@@ -1,37 +1,28 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-// These imports will fail until implementation exists - that's expected for RED tests
-import { mcpTools, handleToolCall } from '../../src/mcp/tools.js'
+import { describe, it, expect, vi } from 'vitest'
+import { mcpTools, handleToolCall, searchTool, fetchTool, doTool, createEsmDoScope } from '../../src/mcp/tools.js'
 import type { ESM } from '../../src/esm.js'
 
 /**
  * MCP Tools Tests
  *
- * These tests define the expected interface for MCP tool handlers.
- * They are RED tests - designed to fail until implementation exists.
- *
- * Related issues:
- * - esm-3c1: MCP esm_write tool
- * - esm-o3m: MCP esm_read tool
- * - esm-6xa: MCP esm_run, esm_test tools
- * - esm-jom: MCP esm_list, esm_versions, esm_diff, esm_delete tools
+ * Tests for the 3-tool architecture: search, fetch, do
+ * All legacy esm_* tools have been removed per issue esm-7buq
  */
 
 describe('MCP Tools', () => {
   describe('mcpTools registry', () => {
-    it('should export all required tools', () => {
-      expect(mcpTools).toBeDefined()
-      expect(mcpTools).toHaveProperty('esm_write')
-      expect(mcpTools).toHaveProperty('esm_read')
-      expect(mcpTools).toHaveProperty('esm_run')
-      expect(mcpTools).toHaveProperty('esm_test')
-      expect(mcpTools).toHaveProperty('esm_list')
-      expect(mcpTools).toHaveProperty('esm_versions')
-      expect(mcpTools).toHaveProperty('esm_diff')
-      expect(mcpTools).toHaveProperty('esm_delete')
+    it('should export exactly 3 tools', () => {
+      expect(Object.keys(mcpTools)).toHaveLength(3)
+    })
+
+    it('should have search, fetch, and do tools', () => {
+      expect(mcpTools).toHaveProperty('search')
+      expect(mcpTools).toHaveProperty('fetch')
+      expect(mcpTools).toHaveProperty('do')
     })
 
     it('should have valid tool definitions with name, description, inputSchema', () => {
-      const toolNames = ['esm_write', 'esm_read', 'esm_run', 'esm_test', 'esm_list', 'esm_versions', 'esm_diff', 'esm_delete']
+      const toolNames = ['search', 'fetch', 'do']
 
       for (const name of toolNames) {
         const tool = mcpTools[name]
@@ -44,143 +35,100 @@ describe('MCP Tools', () => {
     })
   })
 
-  describe('esm_write tool', () => {
+  describe('search tool', () => {
+    it('should have correct name', () => {
+      expect(searchTool.name).toBe('search')
+    })
+
     describe('inputSchema', () => {
-      it('should require name parameter', () => {
-        const schema = mcpTools.esm_write.inputSchema
-        expect(schema.required).toContain('name')
-        expect(schema.properties.name).toEqual({
-          type: 'string',
-          description: expect.stringContaining('module name'),
-        })
+      it('should require query parameter', () => {
+        const schema = mcpTools.search.inputSchema
+        expect(schema.required).toContain('query')
+        expect(schema.properties.query.type).toBe('string')
       })
 
-      it('should accept types parameter', () => {
-        const schema = mcpTools.esm_write.inputSchema
-        expect(schema.properties.types).toEqual({
-          type: 'string',
-          description: expect.stringContaining('TypeScript declarations'),
-        })
-      })
-
-      it('should accept module parameter', () => {
-        const schema = mcpTools.esm_write.inputSchema
-        expect(schema.properties.module).toEqual({
-          type: 'string',
-          description: expect.stringContaining('ESM module'),
-        })
-      })
-
-      it('should accept tests parameter', () => {
-        const schema = mcpTools.esm_write.inputSchema
-        expect(schema.properties.tests).toEqual({
-          type: 'string',
-          description: expect.stringContaining('test'),
-        })
-      })
-
-      it('should accept script parameter', () => {
-        const schema = mcpTools.esm_write.inputSchema
-        expect(schema.properties.script).toEqual({
-          type: 'string',
-          description: expect.stringContaining('script'),
-        })
+      it('should accept optional limit parameter', () => {
+        const schema = mcpTools.search.inputSchema
+        expect(schema.properties.limit).toBeDefined()
+        expect(schema.properties.limit.type).toBe('number')
       })
     })
 
     describe('handler', () => {
-      it('should call esm.write with provided parameters', async () => {
+      it('should call esm.list and return search results', async () => {
         const mockEsm = {
-          write: vi.fn().mockResolvedValue({
-            version: 'abc123',
-            testResults: { passed: 2, failed: 0 },
-            value: 42,
-          }),
+          list: vi.fn().mockResolvedValue([
+            { name: '@math/add', version: 'abc123' },
+            { name: '@math/subtract', version: 'def456' },
+          ]),
         } as unknown as ESM
 
-        const result = await handleToolCall('esm_write', {
-          name: '@math/add',
-          types: 'export declare function add(a: number, b: number): number',
-          module: 'export function add(a, b) { return a + b }',
-          tests: 'it("works", () => expect(add(1,2)).toBe(3))',
-          script: 'return add(10, 20)',
+        const result = await handleToolCall('search', {
+          query: 'add',
         }, mockEsm)
 
-        expect(mockEsm.write).toHaveBeenCalledWith({
-          name: '@math/add',
-          types: 'export declare function add(a: number, b: number): number',
-          module: 'export function add(a, b) { return a + b }',
-          tests: 'it("works", () => expect(add(1,2)).toBe(3))',
-          script: 'return add(10, 20)',
-        })
-        expect(result).toEqual({
-          content: [{
-            type: 'text',
-            text: expect.stringContaining('abc123'),
-          }],
-        })
+        expect(mockEsm.list).toHaveBeenCalled()
+        expect(result.content[0].text).toContain('@math/add')
       })
 
-      it('should return error response when name is missing', async () => {
-        const mockEsm = {} as ESM
-
-        const result = await handleToolCall('esm_write', {
-          module: 'export const x = 1',
-        }, mockEsm)
-
-        expect(result).toEqual({
-          isError: true,
-          content: [{
-            type: 'text',
-            text: expect.stringContaining('name'),
-          }],
-        })
-      })
-
-      it('should return error response on write failure', async () => {
+      it('should search by scope when query starts with @', async () => {
         const mockEsm = {
-          write: vi.fn().mockRejectedValue(new Error('Write failed')),
+          list: vi.fn().mockResolvedValue([
+            { name: '@math/add', version: 'abc123' },
+          ]),
         } as unknown as ESM
 
-        const result = await handleToolCall('esm_write', {
-          name: '@test/module',
-          module: 'invalid code {{{}}}',
+        await handleToolCall('search', {
+          query: '@math',
         }, mockEsm)
 
-        expect(result).toEqual({
-          isError: true,
-          content: [{
-            type: 'text',
-            text: expect.stringContaining('Write failed'),
-          }],
-        })
+        expect(mockEsm.list).toHaveBeenCalledWith({ scope: '@math' })
+      })
+
+      it('should search by pattern when query does not start with @', async () => {
+        const mockEsm = {
+          list: vi.fn().mockResolvedValue([
+            { name: '@utils/add-helper', version: 'abc123' },
+          ]),
+        } as unknown as ESM
+
+        await handleToolCall('search', {
+          query: 'add',
+        }, mockEsm)
+
+        expect(mockEsm.list).toHaveBeenCalledWith({ pattern: 'add' })
+      })
+
+      it('should respect limit parameter', async () => {
+        const mockEsm = {
+          list: vi.fn().mockResolvedValue([
+            { name: '@a/one', version: 'v1' },
+            { name: '@a/two', version: 'v2' },
+            { name: '@a/three', version: 'v3' },
+          ]),
+        } as unknown as ESM
+
+        const result = await handleToolCall('search', {
+          query: 'a',
+          limit: 2,
+        }, mockEsm)
+
+        const parsed = JSON.parse(result.content[0].text)
+        expect(parsed).toHaveLength(2)
       })
     })
   })
 
-  describe('esm_read tool', () => {
+  describe('fetch tool', () => {
+    it('should have correct name', () => {
+      expect(fetchTool.name).toBe('fetch')
+    })
+
     describe('inputSchema', () => {
-      it('should require name parameter', () => {
-        const schema = mcpTools.esm_read.inputSchema
-        expect(schema.required).toContain('name')
-        expect(schema.properties.name.type).toBe('string')
-      })
-
-      it('should accept optional version parameter', () => {
-        const schema = mcpTools.esm_read.inputSchema
-        expect(schema.properties.version).toEqual({
-          type: 'string',
-          description: expect.stringContaining('version'),
-        })
-      })
-
-      it('should accept optional file parameter', () => {
-        const schema = mcpTools.esm_read.inputSchema
-        expect(schema.properties.file).toEqual({
-          type: 'string',
-          enum: ['types', 'module', 'tests', 'script'],
-          description: expect.any(String),
-        })
+      it('should require resource parameter', () => {
+        const schema = mcpTools.fetch.inputSchema
+        expect(schema.required).toContain('resource')
+        expect(schema.properties.resource.type).toBe('string')
       })
     })
 
@@ -192,17 +140,16 @@ describe('MCP Tools', () => {
             version: 'abc123',
             types: 'export declare function add(a: number, b: number): number',
             module: 'export function add(a, b) { return a + b }',
-            tests: 'it("works", () => {})',
-            script: 'return add(1, 2)',
           }),
         } as unknown as ESM
 
-        const result = await handleToolCall('esm_read', {
-          name: '@math/add',
+        const result = await handleToolCall('fetch', {
+          resource: '@math/add',
         }, mockEsm)
 
         expect(mockEsm.read).toHaveBeenCalledWith('@math/add', undefined)
         expect(result.content[0].text).toContain('@math/add')
+        expect(result.content[0].text).toContain('abc123')
       })
 
       it('should call esm.read with specific version', async () => {
@@ -215,9 +162,8 @@ describe('MCP Tools', () => {
           }),
         } as unknown as ESM
 
-        await handleToolCall('esm_read', {
-          name: '@math/add',
-          version: 'def456',
+        await handleToolCall('fetch', {
+          resource: '@math/add@def456',
         }, mockEsm)
 
         expect(mockEsm.read).toHaveBeenCalledWith('@math/add', 'def456')
@@ -228,8 +174,8 @@ describe('MCP Tools', () => {
           read: vi.fn().mockRejectedValue(new Error('Module not found')),
         } as unknown as ESM
 
-        const result = await handleToolCall('esm_read', {
-          name: '@nonexistent/module',
+        const result = await handleToolCall('fetch', {
+          resource: '@nonexistent/module',
         }, mockEsm)
 
         expect(result.isError).toBe(true)
@@ -238,561 +184,117 @@ describe('MCP Tools', () => {
     })
   })
 
-  describe('esm_run tool', () => {
-    describe('inputSchema', () => {
-      it('should require name parameter', () => {
-        const schema = mcpTools.esm_run.inputSchema
-        expect(schema.required).toContain('name')
-        expect(schema.properties.name.type).toBe('string')
-      })
+  describe('do tool', () => {
+    it('should have correct name', () => {
+      expect(doTool.name).toBe('do')
+    })
 
-      it('should accept optional args parameter', () => {
-        const schema = mcpTools.esm_run.inputSchema
-        expect(schema.properties.args).toBeDefined()
+    describe('inputSchema', () => {
+      it('should require code parameter', () => {
+        const schema = mcpTools.do.inputSchema
+        expect(schema.required).toContain('code')
+        expect(schema.properties.code.type).toBe('string')
       })
     })
 
     describe('handler', () => {
-      it('should call esm.run with module name', async () => {
+      it('should execute code and return result', async () => {
         const mockEsm = {
-          run: vi.fn().mockResolvedValue({
-            value: 42,
-            logs: ['log1', 'log2'],
-          }),
+          write: vi.fn().mockResolvedValue({ version: 'v1', name: '@test/mod' }),
+          read: vi.fn(),
+          run: vi.fn(),
+          test: vi.fn(),
+          list: vi.fn(),
+          versions: vi.fn(),
+          diff: vi.fn(),
+          delete: vi.fn(),
         } as unknown as ESM
 
-        const result = await handleToolCall('esm_run', {
-          name: '@math/add',
+        const result = await handleToolCall('do', {
+          code: 'return 1 + 2',
         }, mockEsm)
 
-        expect(mockEsm.run).toHaveBeenCalledWith('@math/add', undefined)
-        expect(result.content[0].text).toContain('42')
+        expect(result.isError).toBeFalsy()
+        const parsed = JSON.parse(result.content[0].text)
+        expect(parsed.success).toBe(true)
+        expect(parsed.value).toBe(3)
       })
 
-      it('should pass args to esm.run', async () => {
-        const mockEsm = {
-          run: vi.fn().mockResolvedValue({
-            value: 100,
-            logs: [],
-          }),
-        } as unknown as ESM
-
-        await handleToolCall('esm_run', {
-          name: '@math/add',
-          args: { a: 50, b: 50 },
-        }, mockEsm)
-
-        expect(mockEsm.run).toHaveBeenCalledWith('@math/add', { a: 50, b: 50 })
-      })
-
-      it('should return error on execution failure', async () => {
-        const mockEsm = {
-          run: vi.fn().mockRejectedValue(new Error('Runtime error')),
-        } as unknown as ESM
-
-        const result = await handleToolCall('esm_run', {
-          name: '@broken/module',
-        }, mockEsm)
-
-        expect(result.isError).toBe(true)
-        expect(result.content[0].text).toContain('Runtime error')
-      })
-    })
-  })
-
-  describe('esm_test tool', () => {
-    describe('inputSchema', () => {
-      it('should require name parameter', () => {
-        const schema = mcpTools.esm_test.inputSchema
-        expect(schema.required).toContain('name')
-        expect(schema.properties.name.type).toBe('string')
-      })
-
-      it('should accept optional filter parameter', () => {
-        const schema = mcpTools.esm_test.inputSchema
-        expect(schema.properties.filter).toEqual({
-          type: 'string',
-          description: expect.stringContaining('filter'),
-        })
-      })
-    })
-
-    describe('handler', () => {
-      it('should call esm.test with module name', async () => {
-        const mockEsm = {
-          test: vi.fn().mockResolvedValue({
-            passed: 5,
-            failed: 0,
-            results: [
-              { name: 'test 1', status: 'passed' },
-              { name: 'test 2', status: 'passed' },
-            ],
-          }),
-        } as unknown as ESM
-
-        const result = await handleToolCall('esm_test', {
-          name: '@math/add',
-        }, mockEsm)
-
-        expect(mockEsm.test).toHaveBeenCalledWith('@math/add', undefined)
-        expect(result.content[0].text).toContain('passed')
-      })
-
-      it('should return detailed test results', async () => {
-        const mockEsm = {
-          test: vi.fn().mockResolvedValue({
-            passed: 2,
-            failed: 1,
-            results: [
-              { name: 'adds numbers', status: 'passed' },
-              { name: 'handles zero', status: 'passed' },
-              { name: 'handles negative', status: 'failed', error: 'Expected -3 but got 3' },
-            ],
-          }),
-        } as unknown as ESM
-
-        const result = await handleToolCall('esm_test', {
-          name: '@math/add',
-        }, mockEsm)
-
-        expect(result.content[0].text).toContain('2')
-        expect(result.content[0].text).toContain('1')
-        expect(result.content[0].text).toContain('failed')
-      })
-
-      it('should pass filter to esm.test', async () => {
-        const mockEsm = {
-          test: vi.fn().mockResolvedValue({ passed: 1, failed: 0, results: [] }),
-        } as unknown as ESM
-
-        await handleToolCall('esm_test', {
-          name: '@math/add',
-          filter: 'adds numbers',
-        }, mockEsm)
-
-        expect(mockEsm.test).toHaveBeenCalledWith('@math/add', 'adds numbers')
-      })
-    })
-  })
-
-  describe('esm_list tool', () => {
-    describe('inputSchema', () => {
-      it('should accept optional pattern parameter', () => {
-        const schema = mcpTools.esm_list.inputSchema
-        expect(schema.properties.pattern).toEqual({
-          type: 'string',
-          description: expect.stringContaining('pattern'),
-        })
-      })
-
-      it('should accept optional scope parameter', () => {
-        const schema = mcpTools.esm_list.inputSchema
-        expect(schema.properties.scope).toEqual({
-          type: 'string',
-          description: expect.stringContaining('scope'),
-        })
-      })
-    })
-
-    describe('handler', () => {
-      it('should call esm.list with no parameters', async () => {
+      it('should provide esm binding in scope', async () => {
         const mockEsm = {
           list: vi.fn().mockResolvedValue([
-            { name: '@math/add', version: 'abc123' },
-            { name: '@math/subtract', version: 'def456' },
+            { name: '@test/mod', version: 'v1' },
           ]),
+          write: vi.fn(),
+          read: vi.fn(),
+          run: vi.fn(),
+          test: vi.fn(),
+          versions: vi.fn(),
+          diff: vi.fn(),
+          delete: vi.fn(),
         } as unknown as ESM
 
-        const result = await handleToolCall('esm_list', {}, mockEsm)
+        const result = await handleToolCall('do', {
+          code: 'return await esm.list()',
+        }, mockEsm)
 
         expect(mockEsm.list).toHaveBeenCalled()
-        expect(result.content[0].text).toContain('@math/add')
-        expect(result.content[0].text).toContain('@math/subtract')
+        expect(result.isError).toBeFalsy()
+        const parsed = JSON.parse(result.content[0].text)
+        expect(parsed.success).toBe(true)
       })
 
-      it('should filter by pattern', async () => {
-        const mockEsm = {
-          list: vi.fn().mockResolvedValue([
-            { name: '@math/add', version: 'abc123' },
-          ]),
-        } as unknown as ESM
+      it('should capture console.log output', async () => {
+        const mockEsm = {} as unknown as ESM
 
-        await handleToolCall('esm_list', {
-          pattern: 'add',
+        const result = await handleToolCall('do', {
+          code: 'console.log("hello"); return 42',
         }, mockEsm)
-
-        expect(mockEsm.list).toHaveBeenCalledWith({ pattern: 'add', scope: undefined })
-      })
-
-      it('should filter by scope', async () => {
-        const mockEsm = {
-          list: vi.fn().mockResolvedValue([
-            { name: '@utils/string', version: 'abc123' },
-          ]),
-        } as unknown as ESM
-
-        await handleToolCall('esm_list', {
-          scope: '@utils',
-        }, mockEsm)
-
-        expect(mockEsm.list).toHaveBeenCalledWith({ pattern: undefined, scope: '@utils' })
-      })
-    })
-  })
-
-  describe('esm_versions tool', () => {
-    describe('inputSchema', () => {
-      it('should require name parameter', () => {
-        const schema = mcpTools.esm_versions.inputSchema
-        expect(schema.required).toContain('name')
-        expect(schema.properties.name.type).toBe('string')
-      })
-
-      it('should accept optional limit parameter', () => {
-        const schema = mcpTools.esm_versions.inputSchema
-        expect(schema.properties.limit).toEqual({
-          type: 'number',
-          description: expect.any(String),
-        })
-      })
-    })
-
-    describe('handler', () => {
-      it('should call esm.versions with module name', async () => {
-        const mockEsm = {
-          versions: vi.fn().mockResolvedValue([
-            { version: 'abc123', message: 'Initial commit', date: '2024-01-01' },
-            { version: 'def456', message: 'Added tests', date: '2024-01-02' },
-          ]),
-        } as unknown as ESM
-
-        const result = await handleToolCall('esm_versions', {
-          name: '@math/add',
-        }, mockEsm)
-
-        expect(mockEsm.versions).toHaveBeenCalledWith('@math/add', undefined)
-        expect(result.content[0].text).toContain('abc123')
-        expect(result.content[0].text).toContain('def456')
-      })
-
-      it('should pass limit parameter', async () => {
-        const mockEsm = {
-          versions: vi.fn().mockResolvedValue([]),
-        } as unknown as ESM
-
-        await handleToolCall('esm_versions', {
-          name: '@math/add',
-          limit: 5,
-        }, mockEsm)
-
-        expect(mockEsm.versions).toHaveBeenCalledWith('@math/add', 5)
-      })
-    })
-  })
-
-  describe('esm_diff tool', () => {
-    describe('inputSchema', () => {
-      it('should require name parameter', () => {
-        const schema = mcpTools.esm_diff.inputSchema
-        expect(schema.required).toContain('name')
-        expect(schema.properties.name.type).toBe('string')
-      })
-
-      it('should require from version parameter', () => {
-        const schema = mcpTools.esm_diff.inputSchema
-        expect(schema.required).toContain('from')
-        expect(schema.properties.from.type).toBe('string')
-      })
-
-      it('should accept optional to version parameter', () => {
-        const schema = mcpTools.esm_diff.inputSchema
-        expect(schema.properties.to).toEqual({
-          type: 'string',
-          description: expect.stringContaining('version'),
-        })
-      })
-    })
-
-    describe('handler', () => {
-      it('should call esm.diff with module name and versions', async () => {
-        const mockEsm = {
-          diff: vi.fn().mockResolvedValue({
-            from: 'abc123',
-            to: 'def456',
-            changes: [
-              { file: 'index.mjs', additions: 5, deletions: 2 },
-            ],
-            patch: '--- a/index.mjs\n+++ b/index.mjs\n@@ -1,3 +1,6 @@\n...',
-          }),
-        } as unknown as ESM
-
-        const result = await handleToolCall('esm_diff', {
-          name: '@math/add',
-          from: 'abc123',
-          to: 'def456',
-        }, mockEsm)
-
-        expect(mockEsm.diff).toHaveBeenCalledWith('@math/add', 'abc123', 'def456')
-        expect(result.content[0].text).toContain('abc123')
-        expect(result.content[0].text).toContain('def456')
-      })
-
-      it('should default to HEAD when to is not provided', async () => {
-        const mockEsm = {
-          diff: vi.fn().mockResolvedValue({
-            from: 'abc123',
-            to: 'HEAD',
-            changes: [],
-            patch: '',
-          }),
-        } as unknown as ESM
-
-        await handleToolCall('esm_diff', {
-          name: '@math/add',
-          from: 'abc123',
-        }, mockEsm)
-
-        expect(mockEsm.diff).toHaveBeenCalledWith('@math/add', 'abc123', 'HEAD')
-      })
-    })
-
-    describe('esm_diff integration', () => {
-      // Create a mock ESM that stores modules with version history
-      let mockESM: ESM
-      let storedModules: Map<string, Array<{ version: string; types: string; module: string }>>
-
-      beforeEach(() => {
-        storedModules = new Map()
-        mockESM = {
-          write: vi.fn().mockImplementation(async (options: { name: string; types?: string; module?: string }) => {
-            const version = `v${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-            const moduleHistory = storedModules.get(options.name) || []
-            moduleHistory.push({
-              version,
-              types: options.types || '',
-              module: options.module || '',
-            })
-            storedModules.set(options.name, moduleHistory)
-            return { version, name: options.name }
-          }),
-          diff: vi.fn().mockImplementation(async (name: string, from: string, to: string) => {
-            const history = storedModules.get(name)
-            if (!history) {
-              throw new Error(`Module ${name} not found`)
-            }
-            const fromVersion = history.find(h => h.version === from)
-            const toVersion = to === 'HEAD' ? history[history.length - 1] : history.find(h => h.version === to)
-            if (!fromVersion) {
-              throw new Error(`Version ${from} not found for module ${name}`)
-            }
-            if (!toVersion) {
-              throw new Error(`Version ${to} not found for module ${name}`)
-            }
-            // Note: This mock doesn't generate real diffs - implementation needed
-            return {
-              from,
-              to: to === 'HEAD' ? toVersion.version : to,
-              changes: [],
-              patch: '',
-            }
-          }),
-        } as unknown as ESM
-      })
-
-      it('should compare two versions of a module', async () => {
-        // Create initial version
-        const writeResult1 = await mockESM.write({
-          name: '@test/diff-mod',
-          types: 'export declare function v1(): number;',
-          module: 'export function v1() { return 1; }',
-        })
-        const v1 = writeResult1.version
-
-        // Update to create new version
-        const writeResult2 = await mockESM.write({
-          name: '@test/diff-mod',
-          types: 'export declare function v2(): number;',
-          module: 'export function v2() { return 2; }',
-        })
-        const v2 = writeResult2.version
-
-        const result = await handleToolCall('esm_diff', {
-          name: '@test/diff-mod',
-          from: v1,
-          to: v2,
-        }, mockESM)
 
         expect(result.isError).toBeFalsy()
-        expect(result.content[0].text).toContain('Diff')
-        expect(result.content[0].text).toContain('from')
-        expect(result.content[0].text).toContain('to')
+        const parsed = JSON.parse(result.content[0].text)
+        expect(parsed.logs).toContain('hello')
       })
 
-      it('should show additions and deletions', async () => {
-        // Create a mock that returns changes with additions/deletions
-        const mockWithChanges = {
-          ...mockESM,
-          diff: vi.fn().mockImplementation(async () => {
-            // Note: The real implementation should return proper diff stats
-            // This mock returns empty changes - implementation needs to compute real diffs
-            return {
-              from: 'v1',
-              to: 'v2',
-              changes: [], // Real implementation should return file changes with stats
-              patch: '',
-            }
-          }),
-        } as unknown as ESM
+      it('should return error for invalid code', async () => {
+        const mockEsm = {} as unknown as ESM
 
-        const result = await handleToolCall('esm_diff', {
-          name: '@test/diff-changes',
-          from: 'v1',
-          to: 'v2',
-        }, mockWithChanges)
-
-        expect(result.isError).toBeFalsy()
-        // Should show file changes with additions/deletions - will FAIL because mock returns empty changes
-        expect(result.content[0].text).toMatch(/\+\d+|\-\d+|additions|deletions/i)
-      })
-
-      it('should default to HEAD when to is not specified', async () => {
-        // Create a mock that returns HEAD literal in output
-        const mockWithHEAD = {
-          ...mockESM,
-          diff: vi.fn().mockImplementation(async (name: string, from: string, to: string) => {
-            // Return a response that includes the literal 'to' value for verification
-            return {
-              from,
-              to,
-              changes: [],
-              patch: '',
-            }
-          }),
-        } as unknown as ESM
-
-        const result = await handleToolCall('esm_diff', {
-          name: '@test/diff-head',
-          from: 'v1',
-        }, mockWithHEAD)
-
-        expect(result.isError).toBeFalsy()
-        // The output should indicate that HEAD was used (showing "to HEAD" or similar)
-        expect(result.content[0].text).toContain('HEAD')
-      })
-
-      it('should include patch content', async () => {
-        // Create two versions
-        const writeResult1 = await mockESM.write({
-          name: '@test/diff-patch',
-          types: 'export declare const a: number;',
-          module: 'export const a = 1;',
-        })
-        const v1 = writeResult1.version
-
-        const writeResult2 = await mockESM.write({
-          name: '@test/diff-patch',
-          types: 'export declare const b: number;',
-          module: 'export const b = 2;',
-        })
-        const v2 = writeResult2.version
-
-        const result = await handleToolCall('esm_diff', {
-          name: '@test/diff-patch',
-          from: v1,
-          to: v2,
-        }, mockESM)
-
-        expect(result.isError).toBeFalsy()
-        expect(result.content[0].text).toContain('Patch')
-      })
-
-      it('should error for non-existent module', async () => {
-        const result = await handleToolCall('esm_diff', {
-          name: '@nonexistent/module',
-          from: 'v1',
-        }, mockESM)
-
-        expect(result.isError).toBe(true)
-        expect(result.content[0].text).toContain('not found')
-      })
-
-      it('should error for non-existent version', async () => {
-        await mockESM.write({
-          name: '@test/diff-ver',
-          types: 'export {};',
-          module: 'export {};',
-        })
-
-        const result = await handleToolCall('esm_diff', {
-          name: '@test/diff-ver',
-          from: 'nonexistent-version',
-        }, mockESM)
-
-        expect(result.isError).toBe(true)
-        expect(result.content[0].text).toMatch(/version.*not found/i)
-      })
-    })
-  })
-
-  describe('esm_delete tool', () => {
-    describe('inputSchema', () => {
-      it('should require name parameter', () => {
-        const schema = mcpTools.esm_delete.inputSchema
-        expect(schema.required).toContain('name')
-        expect(schema.properties.name.type).toBe('string')
-      })
-
-      it('should accept optional force parameter', () => {
-        const schema = mcpTools.esm_delete.inputSchema
-        expect(schema.properties.force).toEqual({
-          type: 'boolean',
-          description: expect.any(String),
-        })
-      })
-    })
-
-    describe('handler', () => {
-      it('should call esm.delete with module name', async () => {
-        const mockEsm = {
-          delete: vi.fn().mockResolvedValue({
-            deleted: true,
-            name: '@math/add',
-          }),
-        } as unknown as ESM
-
-        const result = await handleToolCall('esm_delete', {
-          name: '@math/add',
-        }, mockEsm)
-
-        expect(mockEsm.delete).toHaveBeenCalledWith('@math/add', false)
-        expect(result.content[0].text).toContain('deleted')
-      })
-
-      it('should pass force parameter', async () => {
-        const mockEsm = {
-          delete: vi.fn().mockResolvedValue({ deleted: true }),
-        } as unknown as ESM
-
-        await handleToolCall('esm_delete', {
-          name: '@math/add',
-          force: true,
-        }, mockEsm)
-
-        expect(mockEsm.delete).toHaveBeenCalledWith('@math/add', true)
-      })
-
-      it('should return error when module has dependents and force is false', async () => {
-        const mockEsm = {
-          delete: vi.fn().mockRejectedValue(new Error('Module has dependents: @other/module')),
-        } as unknown as ESM
-
-        const result = await handleToolCall('esm_delete', {
-          name: '@math/add',
-          force: false,
+        const result = await handleToolCall('do', {
+          code: 'throw new Error("intentional error")',
         }, mockEsm)
 
         expect(result.isError).toBe(true)
-        expect(result.content[0].text).toContain('dependents')
+        const parsed = JSON.parse(result.content[0].text)
+        expect(parsed.success).toBe(false)
+        expect(parsed.error).toContain('intentional error')
+      })
+    })
+
+    describe('createEsmDoScope', () => {
+      it('should create a scope with esm binding', () => {
+        const mockEsm = {
+          write: vi.fn(),
+          read: vi.fn(),
+          run: vi.fn(),
+          test: vi.fn(),
+          list: vi.fn(),
+          versions: vi.fn(),
+          diff: vi.fn(),
+          delete: vi.fn(),
+        } as unknown as ESM
+
+        const scope = createEsmDoScope(mockEsm)
+
+        expect(scope.bindings).toHaveProperty('esm')
+        expect(scope.types).toContain('esm')
+        expect(scope.timeout).toBeDefined()
+      })
+
+      it('should allow custom timeout', () => {
+        const mockEsm = {} as unknown as ESM
+        const scope = createEsmDoScope(mockEsm, 60000)
+
+        expect(scope.timeout).toBe(60000)
       })
     })
   })
@@ -807,18 +309,76 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).toContain('Unknown tool')
     })
 
-    it('should validate input against schema before calling handler', async () => {
-      const mockEsm = {
-        write: vi.fn(),
-      } as unknown as ESM
+    it('should return error for legacy esm_write tool', async () => {
+      const mockEsm = {} as ESM
 
-      // Missing required 'name' parameter
-      const result = await handleToolCall('esm_write', {
-        module: 'export const x = 1',
-      }, mockEsm)
+      const result = await handleToolCall('esm_write', { name: '@test/mod' }, mockEsm)
 
       expect(result.isError).toBe(true)
-      expect(mockEsm.write).not.toHaveBeenCalled()
+      expect(result.content[0].text).toContain('Unknown tool')
+    })
+
+    it('should return error for legacy esm_read tool', async () => {
+      const mockEsm = {} as ESM
+
+      const result = await handleToolCall('esm_read', { name: '@test/mod' }, mockEsm)
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Unknown tool')
+    })
+
+    it('should return error for legacy esm_run tool', async () => {
+      const mockEsm = {} as ESM
+
+      const result = await handleToolCall('esm_run', { name: '@test/mod' }, mockEsm)
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Unknown tool')
+    })
+
+    it('should return error for legacy esm_test tool', async () => {
+      const mockEsm = {} as ESM
+
+      const result = await handleToolCall('esm_test', { name: '@test/mod' }, mockEsm)
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Unknown tool')
+    })
+
+    it('should return error for legacy esm_list tool', async () => {
+      const mockEsm = {} as ESM
+
+      const result = await handleToolCall('esm_list', {}, mockEsm)
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Unknown tool')
+    })
+
+    it('should return error for legacy esm_versions tool', async () => {
+      const mockEsm = {} as ESM
+
+      const result = await handleToolCall('esm_versions', { name: '@test/mod' }, mockEsm)
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Unknown tool')
+    })
+
+    it('should return error for legacy esm_diff tool', async () => {
+      const mockEsm = {} as ESM
+
+      const result = await handleToolCall('esm_diff', { name: '@test/mod', from: 'v1' }, mockEsm)
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Unknown tool')
+    })
+
+    it('should return error for legacy esm_delete tool', async () => {
+      const mockEsm = {} as ESM
+
+      const result = await handleToolCall('esm_delete', { name: '@test/mod' }, mockEsm)
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain('Unknown tool')
     })
   })
 })

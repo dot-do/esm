@@ -272,11 +272,11 @@ describe('MCP Server', () => {
       expect(Array.isArray(response.result.tools)).toBe(true)
 
       const toolNames = response.result.tools.map((t) => t.name)
-      expect(toolNames).toContain('esm_read')
-      expect(toolNames).toContain('esm_write')
-      expect(toolNames).toContain('esm_run')
-      expect(toolNames).toContain('esm_test')
-      expect(toolNames).toContain('esm_versions')
+      // New 3-tool architecture: search, fetch, do
+      expect(toolNames).toContain('search')
+      expect(toolNames).toContain('fetch')
+      expect(toolNames).toContain('do')
+      expect(toolNames).toHaveLength(3)
     })
 
     it('should include tool descriptions and schemas', async () => {
@@ -290,10 +290,10 @@ describe('MCP Server', () => {
       const response = getLastResponse() as {
         result: { tools: Array<{ name: string; description: string; inputSchema: object }> }
       }
-      const esmRead = response.result.tools.find((t) => t.name === 'esm_read')
-      expect(esmRead).toBeDefined()
-      expect(esmRead?.description).toBeTruthy()
-      expect(esmRead?.inputSchema).toBeDefined()
+      const searchTool = response.result.tools.find((t) => t.name === 'search')
+      expect(searchTool).toBeDefined()
+      expect(searchTool?.description).toBeTruthy()
+      expect(searchTool?.inputSchema).toBeDefined()
     })
   })
 
@@ -309,15 +309,15 @@ describe('MCP Server', () => {
       await waitForResponse()
     })
 
-    it('should call esm_read tool', async () => {
+    it('should call search tool', async () => {
       simulateRequest({
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'esm_read',
+          name: 'search',
           arguments: {
-            name: '@test/module',
+            query: '@test',
           },
         },
       })
@@ -328,21 +328,41 @@ describe('MCP Server', () => {
       }
       expect(response.result.content).toBeDefined()
       expect(response.result.content[0].type).toBe('text')
+      expect(response.result.content[0].text).toContain('@test/a')
+      expect(mockEsm.list).toHaveBeenCalled()
+    })
+
+    it('should call fetch tool', async () => {
+      simulateRequest({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'fetch',
+          arguments: {
+            resource: '@test/module',
+          },
+        },
+      })
+      await waitForResponse()
+
+      const response = getLastResponse() as {
+        result: { content: Array<{ type: string; text: string }> }
+      }
       expect(response.result.content[0].text).toContain('@test/module')
+      expect(response.result.content[0].text).toContain('abc123')
       expect(mockEsm.read).toHaveBeenCalledWith('@test/module', undefined)
     })
 
-    it('should call esm_write tool', async () => {
+    it('should call do tool', async () => {
       simulateRequest({
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'esm_write',
+          name: 'do',
           arguments: {
-            name: '@test/new',
-            types: 'export declare const x: number;',
-            module: 'export const x = 1;',
+            code: 'return 1 + 2',
           },
         },
       })
@@ -351,24 +371,19 @@ describe('MCP Server', () => {
       const response = getLastResponse() as {
         result: { content: Array<{ type: string; text: string }> }
       }
-      expect(response.result.content[0].text).toContain('abc123')
-      expect(mockEsm.write).toHaveBeenCalledWith({
-        name: '@test/new',
-        types: 'export declare const x: number;',
-        module: 'export const x = 1;',
-      })
+      expect(response.result.content[0].text).toContain('3')
+      expect(response.result.content[0].text).toContain('success')
     })
 
-    it('should call esm_run tool', async () => {
+    it('should call do tool with esm binding', async () => {
       simulateRequest({
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'esm_run',
+          name: 'do',
           arguments: {
-            name: '@test/module',
-            args: { x: 10 },
+            code: 'return await esm.list()',
           },
         },
       })
@@ -377,52 +392,7 @@ describe('MCP Server', () => {
       const response = getLastResponse() as {
         result: { content: Array<{ type: string; text: string }> }
       }
-      expect(response.result.content[0].text).toContain('42')
-      expect(mockEsm.run).toHaveBeenCalledWith('@test/module', { x: 10 })
-    })
-
-    it('should call esm_test tool', async () => {
-      simulateRequest({
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: {
-          name: 'esm_test',
-          arguments: {
-            name: '@test/module',
-          },
-        },
-      })
-      await waitForResponse()
-
-      const response = getLastResponse() as {
-        result: { content: Array<{ type: string; text: string }> }
-      }
-      expect(response.result.content[0].text).toContain('passed')
-      expect(mockEsm.test).toHaveBeenCalledWith('@test/module', undefined)
-    })
-
-    it('should call esm_versions tool', async () => {
-      simulateRequest({
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: {
-          name: 'esm_versions',
-          arguments: {
-            name: '@test/module',
-            limit: 5,
-          },
-        },
-      })
-      await waitForResponse()
-
-      const response = getLastResponse() as {
-        result: { content: Array<{ type: string; text: string }> }
-      }
-      expect(response.result.content[0].text).toContain('abc123')
-      expect(response.result.content[0].text).toContain('def456')
-      expect(mockEsm.versions).toHaveBeenCalledWith('@test/module', 5)
+      expect(mockEsm.list).toHaveBeenCalled()
     })
 
     it('should return error for unknown tool', async () => {
@@ -433,6 +403,27 @@ describe('MCP Server', () => {
         params: {
           name: 'unknown_tool',
           arguments: {},
+        },
+      })
+      await waitForResponse()
+
+      const response = getLastResponse() as {
+        result: { isError: boolean; content: Array<{ text: string }> }
+      }
+      expect(response.result.isError).toBe(true)
+      expect(response.result.content[0].text).toContain('Unknown tool')
+    })
+
+    it('should return error for legacy esm_read tool', async () => {
+      simulateRequest({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'esm_read',
+          arguments: {
+            name: '@test/module',
+          },
         },
       })
       await waitForResponse()
@@ -470,9 +461,9 @@ describe('MCP Server', () => {
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'esm_read',
+          name: 'fetch',
           arguments: {
-            name: '@nonexistent/module',
+            resource: '@nonexistent/module',
           },
         },
       })
