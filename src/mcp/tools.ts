@@ -7,6 +7,8 @@
 
 import type { DoScope } from '@dotdo/mcp/scope'
 import type { ToolResponse } from '@dotdo/mcp/tools'
+import type { SandboxEnv } from 'ai-evaluate'
+import { createDoHandler as createMcpDoHandler } from '@dotdo/mcp/tools'
 
 /**
  * ESM interface representing the ESM class methods
@@ -93,10 +95,14 @@ export type MCPToolResponse = ToolResponse
 
 /**
  * Search result from module search
+ * Compatible with @dotdo/mcp SearchResult interface
  */
 export interface SearchResult {
   id: string
   title: string
+  /** Description or snippet - required for @dotdo/mcp compatibility */
+  description: string
+  /** @deprecated Use 'description' instead. Kept for backwards compatibility. */
   snippet?: string
   url?: string
   score?: number
@@ -105,10 +111,12 @@ export interface SearchResult {
 
 /**
  * Fetch result from module fetch
+ * Compatible with @dotdo/mcp FetchResult interface
  */
 export interface FetchResult {
   content: string
-  contentType?: string
+  /** MIME type of the content - required for @dotdo/mcp compatibility */
+  mimeType?: string
   metadata?: Record<string, unknown>
 }
 
@@ -117,6 +125,13 @@ export interface FetchResult {
  * Re-exported from @dotdo/mcp/scope for compatibility with the shared type.
  */
 export type { DoScope }
+
+/**
+ * SandboxEnv for the do tool.
+ * Re-exported from ai-evaluate for compatibility.
+ * In Cloudflare Workers, pass env with LOADER binding (from cloudflare:workers).
+ */
+export type { SandboxEnv }
 
 /**
  * Tool definition interface
@@ -258,7 +273,8 @@ export function createSearchHandler(esm: ESM): (input: { query: string; limit?: 
       const searchResults: SearchResult[] = limitedResults.map((m) => ({
         id: m.name,
         title: m.name,
-        snippet: `Version: ${m.version}`,
+        description: `Version: ${m.version}`,
+        snippet: `Version: ${m.version}`, // Deprecated, kept for backwards compatibility
         metadata: { version: m.version },
       }))
 
@@ -389,70 +405,10 @@ declare const esm: {
 }
 
 /**
- * Execute code in a sandboxed environment with the esm binding
+ * Create a do handler for the do tool using @dotdo/mcp's ai-evaluate based implementation
  */
-async function executeInSandbox(code: string, scope: DoScope): Promise<{ success: boolean; value?: unknown; error?: string; logs: string[] }> {
-  const logs: string[] = []
-
-  try {
-    // Create a sandbox console
-    const sandboxConsole = {
-      log: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
-      error: (...args: unknown[]) => logs.push(`[ERROR] ${args.map(String).join(' ')}`),
-      warn: (...args: unknown[]) => logs.push(`[WARN] ${args.map(String).join(' ')}`),
-      info: (...args: unknown[]) => logs.push(`[INFO] ${args.map(String).join(' ')}`),
-    }
-
-    // Wrap code in async function to support top-level await
-    const wrappedCode = `
-      return (async () => {
-        ${code}
-      })()
-    `
-
-    // Create function with bindings as scope
-    const fn = new Function('esm', 'console', wrappedCode)
-    const result = await fn(scope.bindings.esm, sandboxConsole)
-
-    return {
-      success: true,
-      value: result,
-      logs,
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return {
-      success: false,
-      error: message,
-      logs,
-    }
-  }
-}
-
-/**
- * Create a do handler for the do tool
- */
-export function createDoHandler(scope: DoScope): (input: { code: string }) => Promise<MCPToolResponse> {
-  return async (input) => {
-    try {
-      const result = await executeInSandbox(input.code, scope)
-
-      const output = {
-        success: result.success,
-        value: result.value,
-        logs: result.logs,
-        error: result.error,
-      }
-
-      return {
-        content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
-        isError: !result.success,
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error occurred'
-      return errorResponse(message)
-    }
-  }
+export function createDoHandler(scope: DoScope, env?: SandboxEnv): (input: { code: string }) => Promise<MCPToolResponse> {
+  return createMcpDoHandler(scope, env)
 }
 
 // ============================================================================
@@ -462,11 +418,17 @@ export function createDoHandler(scope: DoScope): (input: { code: string }) => Pr
 /**
  * Handle an MCP tool call.
  * Routes to the appropriate handler for: search, fetch, do.
+ *
+ * @param toolName - The name of the tool to call
+ * @param input - The input parameters for the tool
+ * @param esm - The ESM binding
+ * @param env - Optional worker environment with LOADER binding for ai-evaluate
  */
 export async function handleToolCall(
   toolName: string,
   input: Record<string, unknown>,
-  esm: ESM
+  esm: ESM,
+  env?: SandboxEnv
 ): Promise<MCPToolResponse> {
   if (!mcpTools[toolName]) {
     return errorResponse(`Unknown tool: ${toolName}`)
@@ -484,7 +446,7 @@ export async function handleToolCall(
       }
       case 'do': {
         const scope = createEsmDoScope(esm)
-        const handler = createDoHandler(scope)
+        const handler = createDoHandler(scope, env)
         return handler(input as { code: string })
       }
       default:
@@ -536,8 +498,11 @@ export function createToolRegistry(): ToolRegistry {
 
 /**
  * Register the three core MCP tools (search, fetch, do) with esm binding
+ *
+ * @param esm - The ESM binding
+ * @param env - Optional worker environment with LOADER binding for ai-evaluate
  */
-export function registerTools(esm: ESM): ToolRegistry {
+export function registerTools(esm: ESM, env?: SandboxEnv): ToolRegistry {
   const registry = createToolRegistry()
 
   // Register search tool
@@ -550,7 +515,7 @@ export function registerTools(esm: ESM): ToolRegistry {
 
   // Register do tool
   const scope = createEsmDoScope(esm)
-  const doHandler = createDoHandler(scope)
+  const doHandler = createDoHandler(scope, env)
   registry.register(doTool, doHandler as (input: unknown) => Promise<MCPToolResponse>)
 
   return registry

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mcpTools, handleToolCall, searchTool, fetchTool, doTool, createEsmDoScope } from '../../src/mcp/tools.js'
-import type { ESM } from '../../src/mcp/tools.js'
+import type { ESM, SearchResult, FetchResult } from '../../src/mcp/tools.js'
 
 /**
  * MCP Tools Tests
@@ -296,6 +296,73 @@ describe('MCP Tools', () => {
 
         expect(scope.timeout).toBe(60000)
       })
+    })
+  })
+
+  // ==========================================================================
+  // Type Compatibility Tests (esm-c1iq, esm-c4gy)
+  // ==========================================================================
+  describe('SearchResult type compatibility', () => {
+    it('should have description field for @dotdo/mcp compatibility', () => {
+      // RED: SearchResult must have 'description' field to match @dotdo/mcp interface
+      const result: SearchResult = {
+        id: 'test-id',
+        title: 'Test Title',
+        description: 'Test description',
+      }
+
+      expect(result.description).toBe('Test description')
+    })
+
+    it('should support snippet as alias for backwards compatibility', () => {
+      // SearchResult can still have snippet for backwards compatibility
+      const result: SearchResult = {
+        id: 'test-id',
+        title: 'Test Title',
+        description: 'Test description',
+        snippet: 'Test snippet',
+      }
+
+      expect(result.snippet).toBe('Test snippet')
+      expect(result.description).toBe('Test description')
+    })
+
+    it('should return search results with description field from handler', async () => {
+      const mockEsm = {
+        list: vi.fn().mockResolvedValue([
+          { name: '@math/add', version: 'abc123' },
+        ]),
+      } as unknown as ESM
+
+      const result = await handleToolCall('search', { query: 'math' }, mockEsm)
+      const parsed = JSON.parse(result.content[0].text)
+
+      // RED: Each result must have 'description' field
+      expect(parsed[0]).toHaveProperty('description')
+      expect(typeof parsed[0].description).toBe('string')
+    })
+  })
+
+  describe('FetchResult type compatibility', () => {
+    it('should have mimeType field for @dotdo/mcp compatibility', () => {
+      // RED: FetchResult must have 'mimeType' field to match @dotdo/mcp interface
+      const result: FetchResult = {
+        content: 'Test content',
+        mimeType: 'text/plain',
+      }
+
+      expect(result.mimeType).toBe('text/plain')
+    })
+
+    it('should not have contentType field (deprecated)', () => {
+      // FetchResult should use mimeType, not contentType
+      const result: FetchResult = {
+        content: 'Test content',
+        mimeType: 'application/json',
+      }
+
+      // contentType should not exist on the interface
+      expect('contentType' in result).toBe(false)
     })
   })
 
