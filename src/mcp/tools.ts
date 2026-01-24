@@ -5,6 +5,9 @@
  * Each tool operates with the `esm` binding for module operations.
  */
 
+import type { DoScope } from '@dotdo/mcp/scope'
+import type { ToolResponse } from '@dotdo/mcp/tools'
+
 /**
  * ESM interface representing the ESM class methods
  * This is the binding exposed in the DoScope for code execution
@@ -84,11 +87,9 @@ export interface ESM {
 
 /**
  * MCP Tool response format
+ * Re-exported from @dotdo/mcp for compatibility with the shared type.
  */
-export interface MCPToolResponse {
-  content: Array<{ type: 'text'; text: string }>
-  isError?: boolean
-}
+export type MCPToolResponse = ToolResponse
 
 /**
  * Search result from module search
@@ -112,13 +113,10 @@ export interface FetchResult {
 }
 
 /**
- * DoScope configuration for the do tool
+ * DoScope configuration for the do tool.
+ * Re-exported from @dotdo/mcp/scope for compatibility with the shared type.
  */
-export interface DoScope {
-  bindings: Record<string, unknown>
-  types: string
-  timeout?: number
-}
+export type { DoScope }
 
 /**
  * Tool definition interface

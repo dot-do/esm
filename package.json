@@ -77,6 +77,7 @@
   },
   "dependencies": {
     "@dotdo/esm": "workspace:*",
+    "@dotdo/mcp": "^0.1.0",
     "ai-evaluate": "^2.0.2",
     "commander": "^12.1.0"
   },
