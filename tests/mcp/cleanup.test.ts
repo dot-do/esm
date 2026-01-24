@@ -5,17 +5,12 @@ import type { ESM } from '../../src/mcp/tools.js'
 /**
  * MCP Tools Cleanup Tests
  *
- * These tests verify that the MCP server exposes exactly 3 tools:
+ * Verifies the MCP server exposes exactly 3 tools:
  * - search: Search for ESM modules
  * - fetch: Retrieve module content
  * - do: Execute code with esm binding
  *
- * The legacy esm_* tools should be removed from mcpTools registry.
- *
- * RED PHASE: These tests are expected to FAIL with current implementation
- * because mcpTools still contains legacy tools (esm_write, esm_read, etc.)
- *
- * Related issue: esm-bz6f
+ * Also verifies that legacy esm_* tools are rejected.
  */
 
 describe('MCP Tools Cleanup - 3-tool architecture', () => {

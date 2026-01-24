@@ -1,8 +1,8 @@
 /**
- * MCP Tool Handlers for esm.do
+ * MCP Tool Definitions and Handlers for esm.do
  *
- * Implements the search/fetch/do pattern following the MCP server library.
- * Provides 3 core tools with the `esm` binding for module operations.
+ * Implements the 3-tool architecture: search, fetch, do.
+ * Each tool operates with the `esm` binding for module operations.
  */
 
 /**
@@ -204,8 +204,7 @@ export const doTool: MCPTool = {
 }
 
 /**
- * Registry of all MCP tools
- * Only contains the 3 core tools: search, fetch, do
+ * Registry of all MCP tools: search, fetch, do
  */
 export const mcpTools: Record<string, MCPTool> = {
   search: searchTool,
@@ -227,15 +226,8 @@ function successResponse(text: string): MCPToolResponse {
 /**
  * Format an error response
  */
-function errorResponse(message: string, details?: Record<string, string>): MCPToolResponse {
-  let text = `Error: ${message}`
-  if (details && Object.keys(details).length > 0) {
-    text += '\n\nDetails:'
-    for (const [key, value] of Object.entries(details)) {
-      text += `\n  - ${key}: ${value}`
-    }
-  }
-  return { isError: true, content: [{ type: 'text', text }] }
+function errorResponse(message: string): MCPToolResponse {
+  return { isError: true, content: [{ type: 'text', text: `Error: ${message}` }] }
 }
 
 // ============================================================================
@@ -400,7 +392,6 @@ declare const esm: {
 
 /**
  * Execute code in a sandboxed environment with the esm binding
- * This is a simplified implementation - in production, use ai-evaluate
  */
 async function executeInSandbox(code: string, scope: DoScope): Promise<{ success: boolean; value?: unknown; error?: string; logs: string[] }> {
   const logs: string[] = []
@@ -471,38 +462,36 @@ export function createDoHandler(scope: DoScope): (input: { code: string }) => Pr
 // ============================================================================
 
 /**
- * Handle an MCP tool call
- * Only supports the 3 core tools: search, fetch, do
+ * Handle an MCP tool call.
+ * Routes to the appropriate handler for: search, fetch, do.
  */
 export async function handleToolCall(
   toolName: string,
   input: Record<string, unknown>,
   esm: ESM
 ): Promise<MCPToolResponse> {
-  // Check for unknown tool
   if (!mcpTools[toolName]) {
     return errorResponse(`Unknown tool: ${toolName}`)
   }
 
   try {
-    if (toolName === 'search') {
-      const handler = createSearchHandler(esm)
-      return handler(input as { query: string; limit?: number })
+    switch (toolName) {
+      case 'search': {
+        const handler = createSearchHandler(esm)
+        return handler(input as { query: string; limit?: number })
+      }
+      case 'fetch': {
+        const handler = createFetchHandler(esm)
+        return handler(input as { resource: string })
+      }
+      case 'do': {
+        const scope = createEsmDoScope(esm)
+        const handler = createDoHandler(scope)
+        return handler(input as { code: string })
+      }
+      default:
+        return errorResponse(`Unknown tool: ${toolName}`)
     }
-
-    if (toolName === 'fetch') {
-      const handler = createFetchHandler(esm)
-      return handler(input as { resource: string })
-    }
-
-    if (toolName === 'do') {
-      const scope = createEsmDoScope(esm)
-      const handler = createDoHandler(scope)
-      return handler(input as { code: string })
-    }
-
-    // Should never reach here since we check mcpTools above
-    return errorResponse(`Unknown tool: ${toolName}`)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return errorResponse(message)

@@ -1,12 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mcpTools, handleToolCall, searchTool, fetchTool, doTool, createEsmDoScope } from '../../src/mcp/tools.js'
-import type { ESM } from '../../src/esm.js'
+import type { ESM } from '../../src/mcp/tools.js'
 
 /**
  * MCP Tools Tests
  *
- * Tests for the 3-tool architecture: search, fetch, do
- * All legacy esm_* tools have been removed per issue esm-7buq
+ * Tests for the 3-tool architecture: search, fetch, do.
+ * Verifies tool definitions, handlers, and rejection of unknown tools.
  */
 
 describe('MCP Tools', () => {

@@ -1,41 +1,24 @@
 /**
  * MCP Module Exports
  *
- * Exports MCP tool definitions, handlers, and server for esm.do
- * Uses the search/fetch/do pattern with esm binding
+ * Provides the 3-tool MCP architecture (search, fetch, do) for esm.do.
+ * Each tool operates with the `esm` binding for module operations.
  */
 
-// Core tools and handlers
-export {
-  mcpTools,
-  handleToolCall,
-  // New pattern tools
-  searchTool,
-  fetchTool,
-  doTool,
-  // Handlers
-  createSearchHandler,
-  createFetchHandler,
-  createDoHandler,
-  // DoScope creation
-  createEsmDoScope,
-  // Tool registry
-  createToolRegistry,
-  registerTools,
-  getToolDefinitions,
-  createToolCallHandler,
-} from './tools.js'
+// Tool definitions
+export { searchTool, fetchTool, doTool, mcpTools } from './tools.js'
+
+// Tool handlers
+export { createSearchHandler, createFetchHandler, createDoHandler, handleToolCall } from './tools.js'
+
+// DoScope
+export { createEsmDoScope } from './tools.js'
+
+// Tool registry
+export { createToolRegistry, registerTools, getToolDefinitions, createToolCallHandler } from './tools.js'
 
 // Types
-export type {
-  ESM,
-  MCPTool,
-  MCPToolResponse,
-  DoScope,
-  SearchResult,
-  FetchResult,
-  ToolRegistry,
-} from './tools.js'
+export type { ESM, MCPTool, MCPToolResponse, DoScope, SearchResult, FetchResult, ToolRegistry } from './tools.js'
 
 // Server
 export { MCPServer, createMCPServer } from './server.js'
