@@ -1,13 +1,13 @@
 {
   "name": "esm.do",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Living ESM module system for AI agents - types, modules, tests, and scripts in one place",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "esm": "./bin/esm",
-    "esm.do": "./bin/esm.do.js",
+    "esm.do": "./bin/esm-do",
     "esm-mcp": "./dist/mcp/server.js"
   },
   "exports": {
