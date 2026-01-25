@@ -77,6 +77,45 @@ esm log @math/add
 # b7c4ee2 Add edge case tests
 ```
 
+### Expression Mode (REPL)
+
+Evaluate TypeScript expressions directly from the command line:
+
+```bash
+# Evaluate expressions
+esm '1 + 2 * 3'
+# 7
+
+esm 'const sum = (a, b) => a + b; sum(10, 20)'
+# 30
+
+# Use local execution (Miniflare, no network required)
+esm --local '1 + 2'
+
+# Enter interactive REPL
+esm --repl
+
+# Combine: evaluate then enter REPL
+esm --repl 'const x = 10'
+> x * 2
+20
+```
+
+**Expression Mode Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--local`, `-l` | Use local Miniflare instead of remote workers |
+| `--repl`, `-i` | Enter interactive REPL after evaluation |
+| `--theme`, `-t` | Syntax highlighting theme |
+| `--timeout` | Evaluation timeout in milliseconds |
+
+**Requirements for local mode:**
+
+```bash
+npm install @dotdo/cli ai-evaluate miniflare
+```
+
 ### API
 
 ```bash

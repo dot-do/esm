@@ -50,7 +50,10 @@
     "changeset:publish": "changeset publish",
     "test:load": "k6 run tests/load/k6/api.js",
     "test:load:smoke": "k6 run --env SCENARIO=smoke tests/load/k6/scenarios.js",
-    "test:load:stress": "k6 run --env SCENARIO=stress tests/load/k6/scenarios.js"
+    "test:load:stress": "k6 run --env SCENARIO=stress tests/load/k6/scenarios.js",
+    "test:cli": "./scripts/test-cli-local.sh",
+    "test:cli:pack": "./scripts/test-cli-pack.sh",
+    "test:cli:full": "./scripts/test-cli-full.sh"
   },
   "keywords": [
     "esm",
