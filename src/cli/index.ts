@@ -124,6 +124,9 @@ program
     console.log('  esm run @scope/name                      Execute module script')
     console.log('  esm test @scope/name                     Run module tests')
     console.log('  esm versions @scope/name                 List module versions')
+    console.log('  esm repl                                 Start TypeScript REPL')
+    console.log('  esm repl "1 + 2"                         Evaluate expression')
+    console.log('  esm repl --local "sum(1, 2)"             Evaluate locally')
     console.log('')
   })
 
@@ -613,6 +616,44 @@ program
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error))
       console.error(`error: ${err.message}`)
+      process.exit(1)
+    }
+  })
+
+// ============================================================================
+// repl command - TypeScript REPL with remote/local execution
+// ============================================================================
+program
+  .command('repl [expression]')
+  .description('Start TypeScript REPL or evaluate expression')
+  .option('-l, --local', 'Use local Miniflare instead of remote workers')
+  .option('-t, --theme <theme>', 'Syntax highlighting theme')
+  .option('--timeout <ms>', 'Evaluation timeout in milliseconds')
+  .action(async (expression: string | undefined, options: { local?: boolean; theme?: string; timeout?: string }) => {
+    try {
+      const cliRepl = await import('@dotdo/cli/repl') as {
+        evalExpression: (expr: string, opts?: Record<string, unknown>) => Promise<unknown>
+        startRepl: (config?: Record<string, unknown>) => Promise<void>
+      }
+
+      const config: Record<string, unknown> = {
+        local: options.local,
+        theme: options.theme,
+        timeout: options.timeout ? parseInt(options.timeout, 10) : undefined,
+      }
+
+      if (expression) {
+        await cliRepl.evalExpression(expression, config)
+      } else {
+        await cliRepl.startRepl(config)
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      if (err.message.includes('Cannot find package')) {
+        console.error(formatError('REPL requires @dotdo/cli. Install with: npm install @dotdo/cli'))
+      } else {
+        console.error(formatError(err.message))
+      }
       process.exit(1)
     }
   })

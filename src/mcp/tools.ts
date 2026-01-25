@@ -407,8 +407,9 @@ declare const esm: {
 /**
  * Create a do handler for the do tool using @dotdo/mcp's ai-evaluate based implementation
  */
-export function createDoHandler(scope: DoScope, env?: SandboxEnv): (input: { code: string }) => Promise<MCPToolResponse> {
-  return createMcpDoHandler(scope, env)
+export function createDoHandler(scope: DoScope, _env?: SandboxEnv): (input: { code: string }) => Promise<MCPToolResponse> {
+  // Note: env parameter is kept for backwards compatibility but @dotdo/mcp no longer uses it
+  return createMcpDoHandler(scope)
 }
 
 // ============================================================================

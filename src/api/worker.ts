@@ -99,6 +99,7 @@
 
 import type { StoredModule } from '../storage/types.js'
 import { generateSha, gitxStorage } from './storage.js'
+import { evaluate } from 'ai-evaluate'
 
 // =============================================================================
 // Extended WriteResult with commit info for API responses
@@ -116,14 +117,15 @@ import { generateSha, gitxStorage } from './storage.js'
 
 // Env interface for worker bindings
 interface Env {
-  unsafe_eval: {
-    eval(code: string): unknown
-    newFunction(...args: string[]): (...args: unknown[]) => unknown
-  }
+  // Worker loader binding for ai-evaluate sandboxed execution
+  // See: https://developers.cloudflare.com/workers/runtime-apis/bindings/worker-loader/
+  // Note: ai-evaluate expects LOADER (uppercase) in SandboxEnv
+  loader: unknown
+  LOADER?: unknown
 }
 
-// Module-level reference to unsafe_eval binding (set in fetch handler)
-let unsafeEval: Env['unsafe_eval'] | null = null
+// Module-level reference to env (set in fetch handler)
+let workerEnv: Env | null = null
 
 interface LogEntry {
   level: 'log' | 'warn' | 'error' | 'info' | 'debug'
@@ -192,196 +194,66 @@ function extractExportNames(module: string): string[] {
   return names
 }
 
-// Simple test framework for worker environment
-function createTestRunner() {
-  const results: Array<{ name: string; status: 'passed' | 'failed'; duration?: number; error?: string }> = []
-  const describeStack: string[] = []
-
-  function describe(name: string, fn: () => void) {
-    describeStack.push(name)
-    try {
-      fn()
-    } finally {
-      describeStack.pop()
-    }
-  }
-
-  function it(name: string, fn: () => void) {
-    const fullName = [...describeStack, name].join(' > ')
-    const start = Date.now()
-    try {
-      fn()
-      results.push({ name: fullName, status: 'passed', duration: Date.now() - start })
-    } catch (e: unknown) {
-      const err = e instanceof Error ? e : new Error(String(e))
-      results.push({
-        name: fullName,
-        status: 'failed',
-        duration: Date.now() - start,
-        error: err.message
-      })
-    }
-  }
-
-  function expect(actual: unknown) {
-    return {
-      toBe(expected: unknown) {
-        if (actual !== expected) {
-          throw new Error(`Expected ${JSON.stringify(expected)} but got ${JSON.stringify(actual)}`)
-        }
-      },
-      toEqual(expected: unknown) {
-        if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-          throw new Error(`Expected ${JSON.stringify(expected)} but got ${JSON.stringify(actual)}`)
-        }
-      },
-      toBeCloseTo(expected: number, precision = 2) {
-        const actualNum = actual as number
-        const diff = Math.abs(actualNum - expected)
-        const epsilon = Math.pow(10, -precision)
-        if (diff > epsilon) {
-          throw new Error(`Expected ${expected} (within ${precision} decimal places) but got ${actualNum}`)
-        }
-      },
-      toThrow(message?: string | RegExp) {
-        const fn = actual as () => void
-        let threw = false
-        let thrownError: Error | null = null
-        try {
-          fn()
-        } catch (e: unknown) {
-          threw = true
-          thrownError = e instanceof Error ? e : new Error(String(e))
-        }
-        if (!threw) {
-          throw new Error('Expected function to throw but it did not')
-        }
-        if (message && thrownError) {
-          if (typeof message === 'string' && !thrownError.message.includes(message)) {
-            throw new Error(`Expected error message to include "${message}" but got "${thrownError.message}"`)
-          }
-          if (message instanceof RegExp && !message.test(thrownError.message)) {
-            throw new Error(`Expected error message to match ${message} but got "${thrownError.message}"`)
-          }
-        }
-      },
-      toBeDefined() {
-        if (actual === undefined) {
-          throw new Error('Expected value to be defined but got undefined')
-        }
-      },
-      toBeUndefined() {
-        if (actual !== undefined) {
-          throw new Error(`Expected undefined but got ${JSON.stringify(actual)}`)
-        }
-      },
-      toContain(expected: unknown) {
-        if (Array.isArray(actual)) {
-          if (!actual.includes(expected)) {
-            throw new Error(`Expected array to contain ${JSON.stringify(expected)}`)
-          }
-        } else if (typeof actual === 'string') {
-          if (!actual.includes(expected as string)) {
-            throw new Error(`Expected string to contain "${expected}"`)
-          }
-        }
-      },
-      toMatch(pattern: RegExp) {
-        if (typeof actual !== 'string' || !pattern.test(actual)) {
-          throw new Error(`Expected "${actual}" to match ${pattern}`)
-        }
-      }
-    }
-  }
-
-  return { describe, it, expect, results }
-}
-
-// Helper to create a new function using unsafe_eval or fallback
-// The unsafe_eval binding's newFunction only takes a body (no params),
-// so we use eval() to create a function expression instead
-function createFunction(...args: string[]): (...fnArgs: unknown[]) => unknown {
-  // args = [...paramNames, body] - standard Function constructor signature
-  const body = args.pop() || ''
-  const params = args
-
-  if (unsafeEval && typeof unsafeEval.eval === 'function') {
-    // Use eval to create a function with parameters
-    const paramList = params.join(', ')
-    const fnCode = `(function(${paramList}) { ${body} })`
-    return unsafeEval.eval(fnCode) as (...fnArgs: unknown[]) => unknown
-  }
-
-  // Fallback for environments without unsafe_eval binding
-  // This works in Node.js test environment but not in workerd
-  try {
-    return new Function(...params, body) as (...fnArgs: unknown[]) => unknown
-  } catch (e: unknown) {
-    const err = e instanceof Error ? e : new Error(String(e))
-    throw new Error(`Code generation from strings is not allowed. The unsafe_eval binding may not be configured. Original error: ${err.message}`)
-  }
-}
-
-// Worker-compatible test executor
+// Worker-compatible test executor using ai-evaluate
 async function workerRunTests(moduleCode: string, testCode: string, timeout: number = 5000): Promise<WorkerTestResult> {
   const startTime = Date.now()
 
   try {
+    // Convert ESM to executable format
     const executableModule = convertToExecutable(moduleCode)
     const exportNames = extractExportNames(moduleCode)
-    const { describe, it, expect, results } = createTestRunner()
 
-    // Build the execution context
-    const context: Record<string, unknown> = {
-      describe,
-      it,
-      expect,
-      console: {
-        log: () => {},
-        warn: () => {},
-        error: () => {},
-        info: () => {},
-        debug: () => {}
+    // Build module code that exports to global scope for tests
+    const moduleWithExports = `
+// Block dangerous globals
+globalThis.WebSocket = undefined;
+globalThis.fetch = function() { throw new Error('fetch is not defined'); };
+
+${executableModule}
+
+// Export to global scope for tests
+${exportNames.map(name => `globalThis.${name} = ${name};`).join('\n')}
+`
+
+    const result = await evaluate({
+      module: moduleWithExports,
+      tests: testCode,
+      timeout,
+      fetch: null, // Block network access
+    }, { LOADER: workerEnv?.loader } as Parameters<typeof evaluate>[1])
+
+    if (!result.testResults) {
+      return {
+        passed: 0,
+        failed: 1,
+        total: 1,
+        duration: Date.now() - startTime,
+        tests: [{
+          name: result.error ? 'Module/Test parsing' : 'Test execution',
+          status: 'failed',
+          error: result.error || 'No test results returned'
+        }]
       }
     }
 
-    // Execute module to get exports using unsafe_eval binding
-    const moduleWrapper = createFunction(...Object.keys(context), `
-      ${executableModule}
-      return { ${exportNames.join(', ')} };
-    `)
-
-    const exports = moduleWrapper(...Object.values(context))
-
-    // Add exports to context
-    for (const name of exportNames) {
-      context[name] = (exports as Record<string, unknown>)[name]
-    }
-
-    // Execute tests with timeout using unsafe_eval binding
-    const testWrapper = createFunction(...Object.keys(context), testCode)
-
-    // Use Promise.race for timeout
-    const runTests = async () => {
-      testWrapper(...Object.values(context))
-      return results
-    }
-
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('Test timeout exceeded')), timeout)
+    const tests = result.testResults.tests.map(t => {
+      const test: { name: string; status: 'passed' | 'failed'; duration?: number; error?: string } = {
+        name: t.name,
+        status: t.passed ? 'passed' : 'failed',
+        duration: t.duration,
+      }
+      if (t.error) {
+        test.error = t.error
+      }
+      return test
     })
 
-    const testResults = await Promise.race([runTests(), timeoutPromise])
-
-    const passed = testResults.filter(r => r.status === 'passed').length
-    const failed = testResults.filter(r => r.status === 'failed').length
-
     return {
-      passed,
-      failed,
-      total: passed + failed,
-      duration: Date.now() - startTime,
-      tests: testResults
+      passed: result.testResults.passed,
+      failed: result.testResults.failed,
+      total: result.testResults.total,
+      duration: result.testResults.duration || Date.now() - startTime,
+      tests
     }
   } catch (e: unknown) {
     const err = e instanceof Error ? e : new Error(String(e))
@@ -401,7 +273,7 @@ async function workerRunTests(moduleCode: string, testCode: string, timeout: num
   }
 }
 
-// Worker-compatible script executor
+// Worker-compatible script executor using ai-evaluate
 async function workerRunScript(
   moduleCode: string,
   scriptCode: string,
@@ -409,78 +281,69 @@ async function workerRunScript(
   timeout: number = 5000
 ): Promise<WorkerRunResult> {
   const startTime = Date.now()
-  const logs: LogEntry[] = []
 
   try {
+    // Convert ESM to executable format
     const executableModule = convertToExecutable(moduleCode)
     const exportNames = extractExportNames(moduleCode)
 
-    // Create console proxy to capture logs
-    const consoleProxy = {
-      log: (...logArgs: unknown[]) => logs.push({ level: 'log', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) }),
-      warn: (...logArgs: unknown[]) => logs.push({ level: 'warn', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) }),
-      error: (...logArgs: unknown[]) => logs.push({ level: 'error', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) }),
-      info: (...logArgs: unknown[]) => logs.push({ level: 'info', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) }),
-      debug: (...logArgs: unknown[]) => logs.push({ level: 'debug', args: logArgs.map(a => typeof a === 'string' ? a : JSON.stringify(a)) })
-    }
+    // Build module code that exports to global scope
+    const moduleWithExports = `
+// Block dangerous globals
+globalThis.WebSocket = undefined;
+globalThis.fetch = function() { throw new Error('fetch is not defined'); };
 
-    // Build the execution context - block dangerous globals
-    const context: Record<string, unknown> = {
-      console: consoleProxy,
-      args: args || {},
-      // Block dangerous globals
-      process: undefined,
-      require: undefined,
-      __dirname: undefined,
-      __filename: undefined,
-      global: undefined,
-      Buffer: undefined,
-      fetch: undefined
-    }
+${executableModule}
 
-    // Execute module to get exports using unsafe_eval binding
-    const moduleWrapper = createFunction(...Object.keys(context), `
-      "use strict";
-      ${executableModule}
-      return { ${exportNames.join(', ')} };
-    `)
+// Export to global scope for script
+${exportNames.map(name => `globalThis.${name} = ${name};`).join('\n')}
 
-    const exports = moduleWrapper(...Object.values(context))
-
-    // Add exports to context
-    for (const name of exportNames) {
-      context[name] = (exports as Record<string, unknown>)[name]
-    }
+// Inject args
+globalThis.args = ${JSON.stringify(args || {})};
+`
 
     // Wrap script to handle return statements and async
     let wrappedScript = scriptCode
     if (scriptCode.includes('await ')) {
-      wrappedScript = `return (async () => { ${scriptCode} })()`
+      const hasReturn = /\breturn\b/.test(scriptCode)
+      if (hasReturn) {
+        wrappedScript = `return (async () => { ${scriptCode} })()`
+      } else {
+        const lines = scriptCode.trim().split('\n')
+        const lastLine = lines[lines.length - 1]?.trim() || ''
+        if (lastLine && !/^\s*(const|let|var|if|for|while|switch|try|class|function|return|throw)\b/.test(lastLine)) {
+          lines[lines.length - 1] = `return ${lastLine.replace(/;?\s*$/, '')}`
+        }
+        wrappedScript = `return (async () => { ${lines.join('\n')} })()`
+      }
     }
 
-    // Execute script with timeout using unsafe_eval binding
-    const scriptWrapper = createFunction(...Object.keys(context), `
-      "use strict";
-      ${wrappedScript}
-    `)
+    const result = await evaluate({
+      module: moduleWithExports,
+      script: wrappedScript,
+      timeout,
+      fetch: null, // Block network access
+    }, { LOADER: workerEnv?.loader } as Parameters<typeof evaluate>[1])
 
-    const runScript = async () => {
-      const result = scriptWrapper(...Object.values(context))
-      // If result is a promise, await it
-      return result instanceof Promise ? await result : result
+    const logs: LogEntry[] = result.logs.map(l => ({
+      level: l.level as LogEntry['level'],
+      args: [l.message]
+    }))
+
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error || 'Unknown error',
+        logs,
+        duration: Date.now() - startTime
+      }
     }
-
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('Script timeout exceeded')), timeout)
-    })
-
-    const value = await Promise.race([runScript(), timeoutPromise])
 
     return {
       success: true,
-      value,
+      value: result.value,
       logs,
-      duration: Date.now() - startTime
+      duration: result.duration
     }
   } catch (e: unknown) {
     const err = e instanceof Error ? e : new Error(String(e))
@@ -488,7 +351,7 @@ async function workerRunScript(
     return {
       success: false,
       error: err.message,
-      logs,
+      logs: [],
       duration: Date.now() - startTime
     }
   }
@@ -1149,6 +1012,55 @@ function handleOptions(requestOrigin?: string): Response {
   const headers = new Headers()
   addCorsHeaders(headers, requestOrigin)
   return new Response(null, { status: 204, headers })
+}
+
+// =============================================================================
+// Handle POST /api/evaluate - REPL evaluation endpoint
+// =============================================================================
+async function handleEvaluate(
+  request: Request,
+  env: Env,
+  requestId: string
+): Promise<Response> {
+  try {
+    const body = await request.json() as {
+      module?: string
+      script?: string
+      timeout?: number
+      sdk?: boolean
+    }
+
+    const { module = '', script = '', timeout = 5000, sdk = false } = body
+
+    if (!script && !module) {
+      return errorResponse('Either script or module is required', 400, requestId)
+    }
+
+    const result = await evaluate(
+      {
+        module,
+        script,
+        timeout,
+        sdk,
+        fetch: null, // Block network access by default
+      },
+      { LOADER: env.loader } as Parameters<typeof evaluate>[1] // Pass env with loader binding
+    )
+
+    const headers = new Headers({ 'Content-Type': 'application/json', 'X-Request-Id': requestId })
+    addCorsHeaders(headers)
+
+    return new Response(JSON.stringify({
+      success: result.success,
+      value: result.value,
+      logs: result.logs,
+      error: result.error,
+      duration: result.duration,
+    }), { status: result.success ? 200 : 400, headers })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return errorResponse(`Evaluation failed: ${message}`, 500, requestId)
+  }
 }
 
 // Handle GET /:name - module info
@@ -2071,7 +1983,7 @@ async function handleGetDepsGraph(
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Set the unsafe_eval binding for dynamic code execution
-    unsafeEval = env.unsafe_eval
+    workerEnv = env
 
     // Initialize test modules on first request
     await initTestModules()
@@ -2112,6 +2024,11 @@ export default {
       addCorsHeaders(headers)
       const response = new Response(JSON.stringify(errorBody), { status: 429, headers })
       return addRateLimitHeadersFn(response, true)
+    }
+
+    // Handle /api/evaluate for REPL
+    if (path === '/api/evaluate' && method === 'POST') {
+      return addRateLimitHeadersFn(await handleEvaluate(request, env, requestId))
     }
 
     // Handle scope listing (e.g., /storage/ to list modules in @storage scope)

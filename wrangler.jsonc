@@ -7,27 +7,13 @@
   // Enable nodejs_compat for compatibility
   "compatibility_flags": ["nodejs_compat"],
 
-  // Binding to enable unsafe-eval for dynamic code execution
-  // This is required for the Function constructor used in the sandbox executor
-  // Note: This only works in local development (wrangler dev)
-  // The type "eval" gets prefixed with "unsafe_" by wrangler internally
-  "unsafe": {
-    "bindings": [
-      {
-        "name": "unsafe_eval",
-        "type": "eval"
-      }
-    ]
-  },
+  // Worker loaders for ai-evaluate sandboxed execution
+  // See: https://developers.cloudflare.com/workers/runtime-apis/bindings/worker-loader/
+  "worker_loaders": [
+    { "binding": "loader" }
+  ],
 
   "dev": {
     "port": 8787
   }
-
-  // Uncomment for production deployment
-  // "env": {
-  //   "production": {
-  //     "name": "esm-do-production"
-  //   }
-  // }
 }
