@@ -2989,7 +2989,7 @@ const KNOWN_COMMANDS = [
   'deploy', 'cloudflare', 'fly', 'vercel', 'docker', 'railway', 'render',
   'aws', 'gcp', 'azure', 'publish', 'pack', 'unpublish', 'deprecate',
   'dist-tag', 'add', 'rm', 'ls', 'info', 'doctor', 'completion', 'update',
-  'help', '-h', '--help', '-v', '--version',
+  'repl', 'help', '-h', '--help', '-v', '--version',
 ]
 
 /**
@@ -3063,7 +3063,8 @@ async function handleExpressionMode(args: string[]): Promise<void> {
     const fullConfig: Record<string, unknown> = {
       ...config,
       prelude: esmPrelude + ((config.prelude as string) || ''),
-      sdk: config.sdk !== undefined ? config.sdk : true,
+      // Note: sdk requires TEST service binding which may not be available
+      sdk: config.sdk,
     }
 
     // If there's an expression, evaluate it first
