@@ -2938,5 +2938,131 @@ program.on('command:*', (operands) => {
   process.exit(1)
 })
 
-// Parse and execute
-program.parse(process.argv)
+// ============================================================================
+// Expression Mode - detect and evaluate TypeScript expressions
+// ============================================================================
+
+const KNOWN_COMMANDS = [
+  'init', 'write', 'read', 'run', 'test', 'versions', 'log', 'diff', 'delete',
+  'login', 'logout', 'whoami', 'config', 'get', 'set', 'list', 'server',
+  'deploy', 'cloudflare', 'fly', 'vercel', 'docker', 'railway', 'render',
+  'aws', 'gcp', 'azure', 'publish', 'pack', 'unpublish', 'deprecate',
+  'dist-tag', 'add', 'rm', 'ls', 'info', 'doctor', 'completion', 'update',
+  'help', '-h', '--help', '-v', '--version',
+]
+
+/**
+ * Detect if args represent an expression rather than a command
+ */
+function isExpressionMode(args: string[]): boolean {
+  if (args.length === 0) return false
+
+  const firstArg = args[0]
+  if (!firstArg) return false
+
+  // Help and version flags
+  if (firstArg === '-h' || firstArg === '--help') return false
+  if (firstArg === '-v' || firstArg === '--version') return false
+
+  // Known commands
+  if (KNOWN_COMMANDS.includes(firstArg)) return false
+
+  // REPL-specific flags
+  if (firstArg === '--repl' || firstArg === '-i') return true
+  if (firstArg === '--local' || firstArg === '-l') return true
+  if (firstArg === '--eval' || firstArg === '-e') return true
+
+  // Expression indicators: contains =, (), or starts with code patterns
+  if (firstArg.includes('=') && !firstArg.startsWith('-')) return true
+  if (firstArg.includes('(') || firstArg.includes(')')) return true
+  if (firstArg.includes('+') || firstArg.includes('*') || firstArg.includes('/')) return true
+  if (/^[a-z_$][a-z0-9_$]*\s*=/i.test(firstArg)) return true
+
+  // Numeric literal
+  if (/^\d+(\.\d+)?$/.test(firstArg)) return true
+
+  // String literal (quotes)
+  if (firstArg.startsWith('"') || firstArg.startsWith("'") || firstArg.startsWith('`')) return true
+
+  // Arrow function
+  if (args.join(' ').includes('=>')) return true
+
+  return false
+}
+
+/**
+ * Handle expression mode - evaluate TypeScript and optionally enter REPL
+ */
+async function handleExpressionMode(args: string[]): Promise<void> {
+  try {
+    // Dynamically import cli.do REPL module
+    // @ts-expect-error - @dotdo/cli is an optional dependency
+    const cliRepl = await import('@dotdo/cli/repl') as {
+      evalExpression: (expr: string, opts?: Record<string, unknown>) => Promise<unknown>
+      startRepl: (config?: Record<string, unknown>) => Promise<void>
+      parseReplArgs: (args: string[]) => {
+        config: Record<string, unknown>
+        expression?: string
+        interactive: boolean
+      }
+    }
+    const { evalExpression, startRepl, parseReplArgs } = cliRepl
+
+    const { config, expression, interactive } = parseReplArgs(args)
+
+    // ESM-specific prelude
+    const esmPrelude = `
+      // ESM primitives available:
+      // - $: Semantic context
+      // - db: Database operations
+      // - ai: AI operations
+    `
+
+    // Merge ESM prelude with any user-provided prelude
+    const fullConfig: Record<string, unknown> = {
+      ...config,
+      prelude: esmPrelude + ((config.prelude as string) || ''),
+      sdk: config.sdk !== undefined ? config.sdk : true,
+    }
+
+    // If there's an expression, evaluate it first
+    if (expression) {
+      await evalExpression(expression, {
+        local: fullConfig.local,
+        auth: fullConfig.auth,
+        prelude: fullConfig.prelude,
+        sdk: fullConfig.sdk,
+        timeout: fullConfig.timeout,
+        highlight: true,
+        theme: fullConfig.theme,
+      })
+    }
+
+    // Enter REPL if interactive flag or no expression
+    if (interactive || !expression) {
+      await startRepl(fullConfig)
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND') {
+      console.error(formatError(
+        'REPL mode requires @dotdo/cli package.\n' +
+        'Install it with: npm install @dotdo/cli'
+      ))
+    } else {
+      console.error(formatError(
+        error instanceof Error ? error.message : String(error)
+      ))
+    }
+    process.exit(1)
+  }
+}
+
+// Check for expression mode before parsing commands
+const cliArgs = process.argv.slice(2)
+
+if (isExpressionMode(cliArgs)) {
+  handleExpressionMode(cliArgs)
+} else {
+  // Parse and execute as regular command
+  program.parse(process.argv)
+}

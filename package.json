@@ -81,6 +81,9 @@
     "ai-evaluate": "^2.0.2",
     "commander": "^12.1.0"
   },
+  "optionalDependencies": {
+    "@dotdo/cli": ">=0.2.0"
+  },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.0",
     "@changesets/cli": "^2.27.0",
