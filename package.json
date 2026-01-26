@@ -93,7 +93,7 @@
     "@cloudflare/workers-types": "^4.20241218.0",
     "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.2",
-    "esbuild": "^0.24.0",
+    "esbuild": "^0.27.2",
     "miniflare": "^4.20251217.0",
     "tsx": "^4.7.0",
     "typescript": "^5.7.2",
