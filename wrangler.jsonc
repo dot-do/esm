@@ -13,6 +13,16 @@
     { "binding": "loader" }
   ],
 
+  // D1 database for persistent module storage
+  // Create with: wrangler d1 create esm-modules
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "esm-modules",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+
   "dev": {
     "port": 8787
   }

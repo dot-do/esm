@@ -58,7 +58,8 @@
  * - This allows request monitoring, rate limiting, and access control
  */
 
-import { evaluate, type TestResults as AITestResults } from 'ai-evaluate'
+import { evaluate } from 'ai-evaluate'
+import type { TestResults as AITestResults } from 'ai-evaluate'
 import { sanitizeModuleCode, sanitizeTestCode, sanitizeScriptCode } from './sanitize.js'
 import type {
   Executor,

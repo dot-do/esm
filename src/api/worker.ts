@@ -124,9 +124,6 @@ interface Env {
   LOADER?: unknown
 }
 
-// Module-level reference to env (set in fetch handler)
-let workerEnv: Env | null = null
-
 interface LogEntry {
   level: 'log' | 'warn' | 'error' | 'info' | 'debug'
   args: unknown[]
@@ -195,7 +192,7 @@ function extractExportNames(module: string): string[] {
 }
 
 // Worker-compatible test executor using ai-evaluate
-async function workerRunTests(moduleCode: string, testCode: string, timeout: number = 5000): Promise<WorkerTestResult> {
+async function workerRunTests(moduleCode: string, testCode: string, env: Env, timeout: number = 5000): Promise<WorkerTestResult> {
   const startTime = Date.now()
 
   try {
@@ -220,7 +217,7 @@ ${exportNames.map(name => `globalThis.${name} = ${name};`).join('\n')}
       tests: testCode,
       timeout,
       fetch: null, // Block network access
-    }, { LOADER: workerEnv?.loader } as Parameters<typeof evaluate>[1])
+    }, { LOADER: env.loader } as Parameters<typeof evaluate>[1])
 
     if (!result.testResults) {
       return {
@@ -277,6 +274,7 @@ ${exportNames.map(name => `globalThis.${name} = ${name};`).join('\n')}
 async function workerRunScript(
   moduleCode: string,
   scriptCode: string,
+  env: Env,
   args?: Record<string, unknown>,
   timeout: number = 5000
 ): Promise<WorkerRunResult> {
@@ -323,7 +321,7 @@ globalThis.args = ${JSON.stringify(args || {})};
       script: wrappedScript,
       timeout,
       fetch: null, // Block network access
-    }, { LOADER: workerEnv?.loader } as Parameters<typeof evaluate>[1])
+    }, { LOADER: env.loader } as Parameters<typeof evaluate>[1])
 
     const logs: LogEntry[] = result.logs.map(l => ({
       level: l.level as LogEntry['level'],
@@ -358,13 +356,17 @@ globalThis.args = ${JSON.stringify(args || {})};
 }
 
 // Pre-populate test modules in GitxStorage
-let testModulesInitialized = false
+// Use Promise-based lazy initialization to handle concurrent requests safely
+// The Promise is created once and all concurrent calls wait on the same Promise
+let testModulesInitPromise: Promise<void> | null = null
 
 async function initTestModules() {
-  if (testModulesInitialized) return
-  testModulesInitialized = true
+  // If already initialized or in progress, return the existing promise
+  if (testModulesInitPromise) return testModulesInitPromise
 
-  const testModules: StoredModule[] = [
+  // Create the initialization promise - all concurrent calls will wait on this
+  testModulesInitPromise = (async () => {
+    const testModules: StoredModule[] = [
     // @math/add module
     {
       name: '@math/add',
@@ -555,16 +557,36 @@ export function chunk(arr, size) { return _.chunk(arr, size); }`,
     },
   ]
 
-  // Initialize test modules in GitxStorage
-  for (const mod of testModules) {
-    const result = await gitxStorage.write(mod.name, mod)
-    // Create v1.0.0 tag for @math/add module for version GET tests
-    if (mod.name === '@math/add') {
-      gitxStorage.createTag(mod.name, 'v1.0.0', result.version)
+    // Initialize test modules in GitxStorage
+    for (const mod of testModules) {
+      const result = await gitxStorage.write(mod.name, mod)
+      // Create v1.0.0 tag for @math/add module for version GET tests
+      if (mod.name === '@math/add') {
+        gitxStorage.createTag(mod.name, 'v1.0.0', result.version)
+      }
     }
-  }
+  })()
+
+  return testModulesInitPromise
 }
 
+// =============================================================================
+// Rate Limiting
+// =============================================================================
+// IMPORTANT: This module-level Map provides approximate rate limiting within
+// a single worker isolate. In Cloudflare Workers, module-level state is shared
+// across requests within the same isolate but NOT across different isolates.
+//
+// For production deployments with strict rate limiting requirements, consider:
+// 1. Cloudflare's built-in Rate Limiting product
+// 2. A Durable Object for accurate cross-worker counting
+// 3. Using a centralized store (KV with atomic operations, or external service)
+//
+// The current implementation is suitable for:
+// - Development and testing
+// - Basic protection against abuse within a single isolate
+// - Scenarios where approximate limiting is acceptable
+// =============================================================================
 // Rate limiting state
 const requestCounts = new Map<string, { count: number; resetAt: number }>()
 const READ_RATE_LIMIT = 500  // Higher limit for GET (read) operations
@@ -927,8 +949,8 @@ interface TestResults {
   results: TestResult[]
 }
 
-async function runTests(module: StoredModule, timeout?: number): Promise<TestResults> {
-  const result = await workerRunTests(module.module, module.tests, timeout || 5000)
+async function runTests(module: StoredModule, env: Env, timeout?: number): Promise<TestResults> {
+  const result = await workerRunTests(module.module, module.tests, env, timeout || 5000)
 
   // Convert WorkerTestResult to our TestResults format
   const results: TestResult[] = result.tests.map(test => {
@@ -967,8 +989,8 @@ interface RunResult {
   stack?: string
 }
 
-async function runScript(module: StoredModule, input?: Record<string, unknown>, timeout?: number): Promise<RunResult> {
-  const result = await workerRunScript(module.module, module.script, input, timeout || 5000)
+async function runScript(module: StoredModule, env: Env, input?: Record<string, unknown>, timeout?: number): Promise<RunResult> {
+  const result = await workerRunScript(module.module, module.script, env, input, timeout || 5000)
 
   // Convert logs to the expected format
   const logs = result.logs.map(log => ({
@@ -1291,6 +1313,7 @@ async function handleGetBundle(
 async function handleCreateModule(
   fullName: string,
   request: Request,
+  env: Env,
   requestId: string
 ): Promise<Response> {
   // Check authentication for protected namespace
@@ -1352,7 +1375,7 @@ async function handleCreateModule(
   let warning: string | undefined
 
   if (body.tests) {
-    testResults = await runTests(newModule)
+    testResults = await runTests(newModule, env)
 
     // Check for failing tests
     if (testResults.failed > 0 && !body.options?.force) {
@@ -1413,6 +1436,7 @@ async function handleCreateModule(
 async function handleRunTests(
   fullName: string,
   request: Request,
+  env: Env,
   requestId: string
 ): Promise<Response> {
   const module = await gitxStorage.read(fullName)
@@ -1433,7 +1457,7 @@ async function handleRunTests(
     // Ignore parse errors for empty body
   }
 
-  const results = await runTests(module, timeout)
+  const results = await runTests(module, env, timeout)
   return jsonResponse(results)
 }
 
@@ -1441,6 +1465,7 @@ async function handleRunTests(
 async function handleRunScript(
   fullName: string,
   request: Request,
+  env: Env,
   requestId: string
 ): Promise<Response> {
   const module = await gitxStorage.read(fullName)
@@ -1463,7 +1488,7 @@ async function handleRunScript(
     // Ignore parse errors for empty body
   }
 
-  const result = await runScript(module, input, timeout)
+  const result = await runScript(module, env, input, timeout)
 
   if (result.error) {
     if (result.error.includes('timeout')) {
@@ -1982,10 +2007,7 @@ async function handleGetDepsGraph(
 // Main fetch handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Set the unsafe_eval binding for dynamic code execution
-    workerEnv = env
-
-    // Initialize test modules on first request
+    // Initialize test modules on first request (uses promise-based lazy initialization)
     await initTestModules()
 
     const url = new URL(request.url)
@@ -2110,13 +2132,13 @@ export default {
         }
       } else if (method === 'POST') {
         if (action === 'test') {
-          response = await handleRunTests(fullName, request, requestId)
+          response = await handleRunTests(fullName, request, env, requestId)
         } else if (action === 'run') {
-          response = await handleRunScript(fullName, request, requestId)
+          response = await handleRunScript(fullName, request, env, requestId)
         } else if (action === 'revert') {
           response = await handleRevert(fullName, request, requestId)
         } else {
-          response = await handleCreateModule(fullName, request, requestId)
+          response = await handleCreateModule(fullName, request, env, requestId)
         }
       } else if (method === 'DELETE') {
         response = await handleDeleteModule(fullName, request, requestId)

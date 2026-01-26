@@ -1,6 +1,6 @@
 {
   "name": "@dotdo/esm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,9 +9,29 @@
     "./types": "./dist/types.js",
     "./errors": "./dist/errors.js",
     "./executor": "./dist/executor/index.js",
-    "./storage": "./dist/storage/index.js"
+    "./storage": "./dist/storage/index.js",
+    "./deploy": "./dist/deploy/handler.js",
+    "./deploy/cloudflare": "./dist/deploy/adapters/cloudflare.js",
+    "./deploy/vercel": "./dist/deploy/adapters/vercel.js",
+    "./deploy/aws": "./dist/deploy/adapters/aws-lambda.js",
+    "./deploy/netlify": "./dist/deploy/adapters/netlify.js",
+    "./deploy/deno": "./dist/deploy/adapters/deno.js",
+    "./deploy/bun": "./dist/deploy/adapters/bun.js"
   },
   "dependencies": {
     "ai-evaluate": "^2.0.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  },
+  "peerDependencies": {
+    "@dotdo/types": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@dotdo/types": {
+      "optional": true
+    }
   }
 }

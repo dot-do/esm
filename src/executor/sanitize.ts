@@ -1,15 +1,15 @@
 /**
  * Input sanitization utilities for module code
  *
- * Re-exports sanitization utilities from @dotdo/esm core package.
+ * Re-exports sanitization utilities from local core package build.
  * All sanitization logic is now centralized in the core package.
  */
 
-// Re-export all sanitization utilities from core package
+// Re-export all sanitization utilities from local core package build
 export {
   sanitizeModuleCode,
   sanitizeTestCode,
   sanitizeScriptCode,
   sanitizeTypeDefinitions,
   type SanitizationResult,
-} from '@dotdo/esm'
+} from '../../core/dist/executor/sanitize.js'

@@ -27,14 +27,14 @@
 
 import { CircularDependencyError } from '../errors.js'
 
-// Import base types from @dotdo/esm core
+// Import base types from local core package build
 import type {
   ParsedImport as CoreParsedImport,
   DependencyNode,
   DependencyGraph,
   ResolvedModule,
   ModuleFetcher,
-} from '@dotdo/esm'
+} from '../../core/dist/index.js'
 
 /**
  * Extended ParsedImport with alias and re-export support

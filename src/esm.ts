@@ -1,8 +1,11 @@
 /**
- * ESM - Core class for esm.do module management
+ * ESM - Extended class for esm.do module management
  *
- * This class provides the core functionality for managing ESM modules,
- * including reading, writing, running, and testing.
+ * This class extends the core ESM functionality from @dotdo/esm with:
+ * - LRU cache with TTL support
+ * - Dependency tracking for cache invalidation
+ * - Inline module/script execution
+ * - Module code sanitization
  */
 
 import type { StoredModule, ModuleVersion, ModuleStorage, WriteResult as StorageWriteResult } from './storage/types.js'
@@ -20,9 +23,8 @@ import type {
   DiffResult,
   Logger,
 } from './types.js'
-import * as crypto from 'node:crypto'
 import { SandboxExecutor } from './executor/sandbox.js'
-import { sanitizeTypeDefinitions, sanitizeModuleCode } from './executor/sanitize.js'
+import { sanitizeModuleCode, sanitizeTypeDefinitions } from './executor/sanitize.js'
 import { DependencyResolver } from './resolver/dependency.js'
 import { ModuleNotFoundError, ValidationError, ExecutionError } from './errors.js'
 import { LRUCache } from './cache/lru.js'
@@ -43,143 +45,6 @@ export type {
 }
 
 /**
- * Simple mutex implementation for write serialization
- * Ensures thread-safe operations by serializing access to critical sections
- */
-class Mutex {
-  private locked = false
-  private waitQueue: Array<() => void> = []
-
-  async acquire(): Promise<void> {
-    if (!this.locked) {
-      this.locked = true
-      return
-    }
-
-    // Wait for lock to be released
-    return new Promise<void>((resolve) => {
-      this.waitQueue.push(resolve)
-    })
-  }
-
-  release(): void {
-    if (this.waitQueue.length > 0) {
-      // Pass lock to next waiter
-      const next = this.waitQueue.shift()!
-      next()
-    } else {
-      this.locked = false
-    }
-  }
-}
-
-/**
- * In-memory storage for ESM modules
- */
-class InMemoryStorage implements ModuleStorage {
-  private modules: Map<string, { current: StoredModule; versions: Map<string, StoredModule>; history: ModuleVersion[] }> = new Map()
-  private writeLocks: Map<string, Mutex> = new Map()
-
-  /**
-   * Get or create a mutex for a specific module name
-   */
-  private getWriteLock(name: string): Mutex {
-    let mutex = this.writeLocks.get(name)
-    if (!mutex) {
-      mutex = new Mutex()
-      this.writeLocks.set(name, mutex)
-    }
-    return mutex
-  }
-
-  async read(name: string, version?: string): Promise<StoredModule | null> {
-    const entry = this.modules.get(name)
-    if (!entry) return null
-
-    if (version) {
-      const versionedModule = entry.versions.get(version)
-      return versionedModule || null
-    }
-
-    return entry.current
-  }
-
-  async write(name: string, module: StoredModule): Promise<StorageWriteResult> {
-    // Acquire write lock for this module to serialize concurrent writes
-    const lock = this.getWriteLock(name)
-    await lock.acquire()
-
-    try {
-      // Generate content-based hash with timestamp and random nonce for uniqueness
-      // This ensures each write creates a unique version even with identical content
-      const timestamp = Date.now()
-      const nonce = crypto.randomBytes(4).toString('hex')
-      const content = JSON.stringify({
-        types: module.types,
-        module: module.module,
-        tests: module.tests || '',
-        script: module.script || '',
-        _ts: timestamp,
-        _nonce: nonce,
-      })
-      const version = crypto.createHash('sha256').update(content).digest('hex').slice(0, 12)
-
-      const storedModule: StoredModule = { ...module, version }
-
-      let entry = this.modules.get(name)
-      if (!entry) {
-        entry = { current: storedModule, versions: new Map(), history: [] }
-        this.modules.set(name, entry)
-      }
-
-      entry.current = storedModule
-      entry.versions.set(version, storedModule)
-      entry.history.unshift({
-        version: version,
-        message: 'Module updated',
-        timestamp: new Date(timestamp),
-      })
-
-      return { version, name }
-    } finally {
-      // Always release the lock
-      lock.release()
-    }
-  }
-
-  async delete(name: string): Promise<void> {
-    // Acquire write lock for this module to prevent race conditions
-    const lock = this.getWriteLock(name)
-    await lock.acquire()
-
-    try {
-      this.modules.delete(name)
-    } finally {
-      lock.release()
-    }
-  }
-
-  async list(pattern?: string): Promise<string[]> {
-    const names = Array.from(this.modules.keys())
-    if (!pattern) return names
-
-    // Convert glob pattern to regex
-    const regexPattern = pattern
-      .replace(/\*/g, '.*')
-      .replace(/\?/g, '.')
-    const regex = new RegExp(`^${regexPattern}$`)
-    return names.filter(name => regex.test(name))
-  }
-
-  async versions(name: string, limit?: number): Promise<ModuleVersion[]> {
-    const entry = this.modules.get(name)
-    if (!entry) return []
-    // If no limit specified, return all versions; otherwise apply the limit
-    return limit !== undefined ? entry.history.slice(0, limit) : entry.history
-  }
-}
-
-/**
  * Options for creating ESM instance
  */
 export interface ESMOptions {
@@ -193,6 +58,12 @@ export interface ESMOptions {
 
 /**
  * ESM class for managing modules
+ *
+ * Extends the core ESM class with additional features:
+ * - LRU cache with TTL-based expiration
+ * - Dependency tracking for automatic cache invalidation
+ * - Inline module execution without storage lookup
+ * - Module code sanitization before write
  */
 export class ESM {
   private storage: ModuleStorage
@@ -227,7 +98,7 @@ export class ESM {
 
     // Support both legacy usage (ModuleStorage) and new options
     if (options && 'read' in options && typeof options.read === 'function') {
-      resolvedOptions = { storage: options }
+      resolvedOptions = { storage: options as unknown as ModuleStorage }
     } else {
       resolvedOptions = options as ESMOptions | undefined || {}
     }
@@ -235,8 +106,8 @@ export class ESM {
     // Validate options
     this.validateOptions(resolvedOptions)
 
-    // Set storage
-    this.storage = resolvedOptions.storage || new InMemoryStorage()
+    // Set storage - use InMemoryStorage from the class below if not provided
+    this.storage = resolvedOptions.storage as ModuleStorage || new InMemoryStorage()
 
     // Set default options - handle logger separately to avoid exactOptionalPropertyTypes issues
     const baseOptions = {
@@ -1135,6 +1006,151 @@ export class ESM {
     }
 
     return hunks
+  }
+}
+
+/**
+ * Simple mutex implementation for write serialization
+ * Ensures thread-safe operations by serializing access to critical sections
+ */
+class Mutex {
+  private locked = false
+  private waitQueue: Array<() => void> = []
+
+  async acquire(): Promise<void> {
+    if (!this.locked) {
+      this.locked = true
+      return
+    }
+
+    // Wait for lock to be released
+    return new Promise<void>((resolve) => {
+      this.waitQueue.push(resolve)
+    })
+  }
+
+  release(): void {
+    if (this.waitQueue.length > 0) {
+      // Pass lock to next waiter
+      const next = this.waitQueue.shift()!
+      next()
+    } else {
+      this.locked = false
+    }
+  }
+}
+
+/**
+ * In-memory storage for ESM modules
+ * Thread-safe with write locks per module
+ */
+class InMemoryStorage implements ModuleStorage {
+  private modules: Map<string, { current: StoredModule; versions: Map<string, StoredModule>; history: ModuleVersion[] }> = new Map()
+  private writeLocks: Map<string, Mutex> = new Map()
+
+  /**
+   * Get or create a mutex for a specific module name
+   */
+  private getWriteLock(name: string): Mutex {
+    let mutex = this.writeLocks.get(name)
+    if (!mutex) {
+      mutex = new Mutex()
+      this.writeLocks.set(name, mutex)
+    }
+    return mutex
+  }
+
+  async read(name: string, version?: string): Promise<StoredModule | null> {
+    const entry = this.modules.get(name)
+    if (!entry) return null
+
+    if (version) {
+      const versionedModule = entry.versions.get(version)
+      return versionedModule || null
+    }
+
+    return entry.current
+  }
+
+  async write(name: string, module: StoredModule): Promise<StorageWriteResult> {
+    // Acquire write lock for this module to serialize concurrent writes
+    const lock = this.getWriteLock(name)
+    await lock.acquire()
+
+    try {
+      // Generate content-based hash with timestamp and random nonce for uniqueness
+      const timestamp = Date.now()
+      const nonce = Math.random().toString(36).substring(2, 10)
+      const content = JSON.stringify({
+        types: module.types,
+        module: module.module,
+        tests: module.tests || '',
+        script: module.script || '',
+        _ts: timestamp,
+        _nonce: nonce,
+      })
+
+      // Simple hash using string operations (no crypto dependency)
+      let hash = 0
+      for (let i = 0; i < content.length; i++) {
+        const char = content.charCodeAt(i)
+        hash = ((hash << 5) - hash) + char
+        hash = hash & hash // Convert to 32bit integer
+      }
+      const version = Math.abs(hash).toString(16).padStart(12, '0').slice(0, 12)
+
+      const storedModule: StoredModule = { ...module, version }
+
+      let entry = this.modules.get(name)
+      if (!entry) {
+        entry = { current: storedModule, versions: new Map(), history: [] }
+        this.modules.set(name, entry)
+      }
+
+      entry.current = storedModule
+      entry.versions.set(version, storedModule)
+      entry.history.unshift({
+        version: version,
+        message: 'Module updated',
+        timestamp: new Date(timestamp),
+      })
+
+      return { version, name }
+    } finally {
+      // Always release the lock
+      lock.release()
+    }
+  }
+
+  async delete(name: string): Promise<void> {
+    // Acquire write lock for this module to prevent race conditions
+    const lock = this.getWriteLock(name)
+    await lock.acquire()
+
+    try {
+      this.modules.delete(name)
+    } finally {
+      lock.release()
+    }
+  }
+
+  async list(pattern?: string): Promise<string[]> {
+    const names = Array.from(this.modules.keys())
+    if (!pattern) return names
+
+    // Convert glob pattern to regex
+    const regexPattern = pattern
+      .replace(/\*/g, '.*')
+      .replace(/\?/g, '.')
+    const regex = new RegExp(`^${regexPattern}$`)
+    return names.filter(name => regex.test(name))
+  }
+
+  async versions(name: string, limit?: number): Promise<ModuleVersion[]> {
+    const entry = this.modules.get(name)
+    if (!entry) return []
+    // If no limit specified, return all versions; otherwise apply the limit
+    return limit !== undefined ? entry.history.slice(0, limit) : entry.history
   }
 }
 

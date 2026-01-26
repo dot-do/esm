@@ -6,6 +6,7 @@
 
 export { ESM, type WriteOptions, type WriteResult, type ReadResult, type RunResult, type RunOptions, type TestOptions, type TestResult, type SingleTestResult, type DeleteResult, type FileChange, type DiffResult, type ESMOptions } from './esm.js'
 export type { StoredModule, ModuleVersion, ModuleStorage, WriteResult as StorageWriteResult, GitxClient } from './storage/types.js'
+export { D1Storage, D1StorageError, InvalidModuleNameError, ModuleNotFoundError, D1_SCHEMA } from './storage/d1.js'
 
 import { ESM } from './esm.js'
 

@@ -1,5 +1,5 @@
 // src/errors.ts
-// Re-export core errors from @dotdo/esm
+// Re-export core errors from local core package build
 
 export {
   ESMError,
@@ -7,10 +7,10 @@ export {
   ValidationError,
   ExecutionError,
   StorageError,
-} from '@dotdo/esm'
+} from '../core/dist/index.js'
 
 // Import ESMError for extending (src-specific errors)
-import { ESMError } from '@dotdo/esm'
+import { ESMError } from '../core/dist/index.js'
 
 // src-specific error not in core
 export class CircularDependencyError extends ESMError {

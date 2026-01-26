@@ -80,8 +80,15 @@ interface JwtPayload {
   sub?: string
   iat?: number
   exp?: number
+  nbf?: number
   [key: string]: unknown
 }
+
+/**
+ * Supported JWT algorithms for signature verification
+ */
+const SUPPORTED_ALGORITHMS = ['HS256'] as const
+type SupportedAlgorithm = (typeof SUPPORTED_ALGORITHMS)[number]
 
 /**
  * Decode a base64url encoded string
@@ -95,9 +102,24 @@ function base64UrlDecode(str: string): string {
 }
 
 /**
+ * Base64url encode a Uint8Array
+ */
+function base64UrlEncodeBytes(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    const byte = bytes[i]
+    if (byte !== undefined) {
+      binary += String.fromCharCode(byte)
+    }
+  }
+  const base64 = btoa(binary)
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/**
  * Parse a JWT token without verification (for extracting payload)
  */
-function parseJwt(token: string): { header: JwtHeader; payload: JwtPayload } | null {
+function parseJwt(token: string): { header: JwtHeader; payload: JwtPayload; signature: string; signedContent: string } | null {
   try {
     const parts = token.split('.')
     if (parts.length !== 3) {
@@ -106,13 +128,51 @@ function parseJwt(token: string): { header: JwtHeader; payload: JwtPayload } | n
 
     const headerPart = parts[0]
     const payloadPart = parts[1]
-    if (!headerPart || !payloadPart) return null
+    const signature = parts[2]
+    if (!headerPart || !payloadPart || signature === undefined) return null
     const header = JSON.parse(base64UrlDecode(headerPart)) as JwtHeader
     const payload = JSON.parse(base64UrlDecode(payloadPart)) as JwtPayload
 
-    return { header, payload }
+    return { header, payload, signature, signedContent: `${headerPart}.${payloadPart}` }
   } catch {
     return null
+  }
+}
+
+/**
+ * Verify JWT signature using HMAC-SHA256
+ * Uses Web Crypto API for constant-time comparison
+ */
+async function verifyJwtSignature(
+  signedContent: string,
+  signature: string,
+  secret: string
+): Promise<boolean> {
+  try {
+    const encoder = new TextEncoder()
+
+    // Import the secret key for HMAC verification
+    const key = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(secret),
+      { name: 'HMAC', hash: { name: 'SHA-256' } },
+      false,
+      ['sign']
+    )
+
+    // Compute the expected signature
+    const expectedSignatureBytes = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      encoder.encode(signedContent)
+    )
+    const expectedSignature = base64UrlEncodeBytes(new Uint8Array(expectedSignatureBytes))
+
+    // Constant-time comparison of signatures
+    // Use timingSafeEqual for comparing the base64url-encoded signatures
+    return timingSafeEqual(signature, expectedSignature)
+  } catch {
+    return false
   }
 }
 
@@ -201,6 +261,7 @@ export function createAuthMiddleware(config?: AuthConfig): AuthMiddleware {
 
   /**
    * Validate a bearer token (JWT).
+   * Implements full JWT signature verification using HMAC-SHA256.
    */
   async function validateToken(token: string): Promise<AuthResult> {
     // Reject empty tokens
@@ -222,10 +283,10 @@ export function createAuthMiddleware(config?: AuthConfig): AuthMiddleware {
       }
     }
 
-    const { header, payload } = parsed
+    const { header, payload, signature, signedContent } = parsed
 
-    // Security: Reject tokens with algorithm "none"
-    if (header.alg === 'none' || header.alg.toLowerCase() === 'none') {
+    // Security: Reject tokens with algorithm "none" (case-insensitive)
+    if (header.alg.toLowerCase() === 'none') {
       return {
         authenticated: false,
         error: 'Invalid token algorithm',
@@ -233,15 +294,66 @@ export function createAuthMiddleware(config?: AuthConfig): AuthMiddleware {
       }
     }
 
+    // Reject tokens with empty or whitespace-only signature
+    if (!signature || signature.trim() === '') {
+      return {
+        authenticated: false,
+        error: 'Invalid token: missing signature',
+        status: 401,
+      }
+    }
+
+    // Check if algorithm is supported
+    if (!SUPPORTED_ALGORITHMS.includes(header.alg as SupportedAlgorithm)) {
+      return {
+        authenticated: false,
+        error: 'Unsupported token algorithm',
+        status: 401,
+      }
+    }
+
+    // Require tokenSecret for signature verification
+    if (!mergedConfig.tokenSecret) {
+      return {
+        authenticated: false,
+        error: 'Token secret not configured - cannot verify signature',
+        status: 401,
+      }
+    }
+
+    // Verify the signature using constant-time comparison
+    const isValidSignature = await verifyJwtSignature(
+      signedContent,
+      signature,
+      mergedConfig.tokenSecret
+    )
+
+    if (!isValidSignature) {
+      return {
+        authenticated: false,
+        error: 'Invalid token signature',
+        status: 401,
+      }
+    }
+
     // Check for expiry if validation is enabled
+    const now = Math.floor(Date.now() / 1000)
     if (mergedConfig.validateExpiry !== false && payload.exp) {
-      const now = Math.floor(Date.now() / 1000)
       if (payload.exp <= now) {
         return {
           authenticated: false,
           error: 'Token has expired',
           status: 401,
         }
+      }
+    }
+
+    // Check for nbf (not before) claim
+    if (payload.nbf && payload.nbf > now) {
+      return {
+        authenticated: false,
+        error: 'Token is not yet valid',
+        status: 401,
       }
     }
 

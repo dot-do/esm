@@ -95,6 +95,94 @@ function createMockRequest(options: {
 }
 
 // =============================================================================
+// JWT Signing Helpers
+// =============================================================================
+
+/**
+ * Base64url encode a string
+ */
+function base64UrlEncode(str: string): string {
+  const base64 = btoa(str)
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/**
+ * Base64url encode bytes
+ */
+function base64UrlEncodeBytes(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  const base64 = btoa(binary)
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/**
+ * Create a properly signed JWT using HMAC-SHA256
+ */
+async function createSignedJWT(
+  payload: Record<string, unknown>,
+  secret: string,
+  options: { expiresIn?: number; issuedAt?: number } = {}
+): Promise<string> {
+  const now = options.issuedAt ?? Math.floor(Date.now() / 1000)
+  const exp = options.expiresIn ? now + options.expiresIn : now + 3600 // 1 hour default
+
+  const header = { alg: 'HS256', typ: 'JWT' }
+  const fullPayload = { ...payload, iat: now, exp }
+
+  const headerB64 = base64UrlEncode(JSON.stringify(header))
+  const payloadB64 = base64UrlEncode(JSON.stringify(fullPayload))
+  const message = `${headerB64}.${payloadB64}`
+
+  // Sign using Web Crypto API (HMAC-SHA256)
+  const encoder = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: { name: 'SHA-256' } },
+    false,
+    ['sign']
+  )
+  const signatureBytes = await crypto.subtle.sign('HMAC', key, encoder.encode(message))
+  const signature = base64UrlEncodeBytes(new Uint8Array(signatureBytes))
+
+  return `${message}.${signature}`
+}
+
+/**
+ * Create an expired JWT
+ */
+async function createExpiredJWT(
+  payload: Record<string, unknown>,
+  secret: string
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000)
+  const header = { alg: 'HS256', typ: 'JWT' }
+  const fullPayload = { ...payload, iat: now - 7200, exp: now - 3600 } // Expired 1 hour ago
+
+  const headerB64 = base64UrlEncode(JSON.stringify(header))
+  const payloadB64 = base64UrlEncode(JSON.stringify(fullPayload))
+  const message = `${headerB64}.${payloadB64}`
+
+  const encoder = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: { name: 'SHA-256' } },
+    false,
+    ['sign']
+  )
+  const signatureBytes = await crypto.subtle.sign('HMAC', key, encoder.encode(message))
+  const signature = base64UrlEncodeBytes(new Uint8Array(signatureBytes))
+
+  return `${message}.${signature}`
+}
+
+const TEST_SECRET = 'test-secret-key-for-jwt-validation'
+
+// =============================================================================
 // RED Tests: Authentication Middleware Factory
 // =============================================================================
 
@@ -168,13 +256,13 @@ describe('Authentication Middleware - Bearer Token Validation', () => {
     const module = await import('../../src/middleware/auth.js')
     createAuthMiddleware = module.createAuthMiddleware
     middleware = createAuthMiddleware({
-      tokenSecret: 'test-secret-key-for-jwt-validation',
+      tokenSecret: TEST_SECRET,
     })
   })
 
   it('should authenticate valid bearer token', async () => {
-    // A valid JWT token (for testing purposes)
-    const validToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTcwNDA2NzIwMCwiZXhwIjo5OTk5OTk5OTk5fQ.test-signature'
+    // A properly signed JWT token
+    const validToken = await createSignedJWT({ sub: 'user-123' }, TEST_SECRET)
 
     const result = await middleware.validateToken(validToken)
 
@@ -192,8 +280,8 @@ describe('Authentication Middleware - Bearer Token Validation', () => {
   })
 
   it('should reject expired bearer token', async () => {
-    // A token with exp in the past
-    const expiredToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTcwNDA2NzIwMCwiZXhwIjoxNzA0MDY3MjAwfQ.expired-signature'
+    // A properly signed token with exp in the past
+    const expiredToken = await createExpiredJWT({ sub: 'user-123' }, TEST_SECRET)
 
     const result = await middleware.validateToken(expiredToken)
 
@@ -216,7 +304,7 @@ describe('Authentication Middleware - Bearer Token Validation', () => {
   })
 
   it('should extract user ID from token payload', async () => {
-    const validToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTcwNDA2NzIwMCwiZXhwIjo5OTk5OTk5OTk5fQ.test-signature'
+    const validToken = await createSignedJWT({ sub: 'user-123' }, TEST_SECRET)
 
     const result = await middleware.validateToken(validToken)
 
@@ -291,12 +379,13 @@ describe('Authentication Middleware - API Key Validation', () => {
 describe('Authentication Middleware - Request Authentication', () => {
   let createAuthMiddleware: (config?: AuthConfig) => AuthMiddleware
   let middleware: AuthMiddleware
+  const REQUEST_TEST_SECRET = 'test-secret-for-request-auth'
 
   beforeAll(async () => {
     const module = await import('../../src/middleware/auth.js')
     createAuthMiddleware = module.createAuthMiddleware
     middleware = createAuthMiddleware({
-      tokenSecret: 'test-secret',
+      tokenSecret: REQUEST_TEST_SECRET,
       apiKeys: {
         'valid-api-key': 'api-user',
       },
@@ -304,9 +393,10 @@ describe('Authentication Middleware - Request Authentication', () => {
   })
 
   it('should authenticate request with Bearer token in Authorization header', async () => {
+    const validToken = await createSignedJWT({ sub: 'user-123' }, REQUEST_TEST_SECRET)
     const request = createMockRequest({
       headers: {
-        'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTcwNDA2NzIwMCwiZXhwIjo5OTk5OTk5OTk5fQ.test-signature',
+        'Authorization': `Bearer ${validToken}`,
       },
     })
 
@@ -366,9 +456,10 @@ describe('Authentication Middleware - Request Authentication', () => {
   })
 
   it('should prefer Bearer token over API key when both present', async () => {
+    const validToken = await createSignedJWT({ sub: 'bearer-user' }, REQUEST_TEST_SECRET)
     const request = createMockRequest({
       headers: {
-        'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZWFyZXItdXNlciIsImlhdCI6MTcwNDA2NzIwMCwiZXhwIjo5OTk5OTk5OTk5fQ.test-signature',
+        'Authorization': `Bearer ${validToken}`,
         'X-API-Key': 'valid-api-key',
       },
     })
@@ -380,9 +471,10 @@ describe('Authentication Middleware - Request Authentication', () => {
   })
 
   it('should handle Bearer prefix case-insensitively', async () => {
+    const validToken = await createSignedJWT({ sub: 'user-123' }, REQUEST_TEST_SECRET)
     const request = createMockRequest({
       headers: {
-        'Authorization': 'bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTcwNDA2NzIwMCwiZXhwIjo5OTk5OTk5OTk5fQ.test-signature',
+        'Authorization': `bearer ${validToken}`,
       },
     })
 

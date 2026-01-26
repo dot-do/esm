@@ -1,6 +1,19 @@
 import { defineConfig } from 'vitest/config'
+import { resolve, dirname } from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      // Redirect ai-evaluate to Node.js version which includes Miniflare fallback
+      // The main 'ai-evaluate' export requires Cloudflare worker_loaders binding
+      'ai-evaluate': resolve(__dirname, 'node_modules/ai-evaluate/dist/node.js'),
+      // Also alias the explicit /node subpath
+      'ai-evaluate/node': resolve(__dirname, 'node_modules/ai-evaluate/dist/node.js'),
+    },
+  },
   test: {
     include: ['tests/**/*.test.ts'],
     exclude: ['tests/integration/**/*.test.ts'],
