@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -72,7 +72,7 @@ jobs:
 
       - name: Generate artifact attestation
         if: github.event_name != 'pull_request'
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
